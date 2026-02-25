@@ -3,6 +3,7 @@ using JustyBase.NetezzaDriver;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
+[Trait("Category", "Integration")]
 public class AuthenticationTests
 {
     private const string _invalidPassword = "WrongPassword123!";

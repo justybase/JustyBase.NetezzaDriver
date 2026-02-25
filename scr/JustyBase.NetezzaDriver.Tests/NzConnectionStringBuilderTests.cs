@@ -2,6 +2,7 @@ using Xunit;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
+[Trait("Category", "Unit")]
 public class NzConnectionStringBuilderTests
 {
     [Fact]

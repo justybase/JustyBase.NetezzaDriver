@@ -1,9 +1,9 @@
 ﻿using System.Diagnostics;
-using Xunit.Abstractions;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
+[Trait("Category", "Integration")]
 public class CommandTimeoutTest
 {
 
@@ -72,8 +72,8 @@ public class CommandTimeoutTest
     """
         SELECT F1.PRODUCTKEY, COUNT(DISTINCT (F1.PRODUCTKEY / F2.PRODUCTKEY))    
         FROM     
-        ( SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY LIMIT 6000) F1,    
-        ( SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY LIMIT 6000) F2    
+        ( SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY LIMIT 30000) F1,    
+        ( SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY LIMIT 30000) F2    
         GROUP BY 1
         LIMIT 500    
     """;

@@ -104,7 +104,40 @@ public sealed class NzCommand : DbCommand
         return this;
     }
 
+    private async Task<NzCommand> ExecuteAsync(string operation, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            Clear();
+            if (!_connection.InTransaction && !_connection.AutoCommit)
+            {
+                await _connection.ExecuteAsync(this, "begin", cancellationToken).ConfigureAwait(false);
+                _connection.InTransaction = true;
+            }
+            await _connection.ExecuteAsync(this, operation, cancellationToken).ConfigureAwait(false);
+            _connection.SetState(ConnectionState.Open);
+        }
+        catch (AttributeException ex)
+        {
+            if (_connection is null)
+            {
+                throw new InterfaceException("Command closed", ex);
+            }
+            else if (_connection.IsBaseStreamNull)
+            {
+                throw new InterfaceException("Connection closed in Command Execute", ex);
+            }
+
+            throw;
+        }
+        return this;
+    }
+
     private NzDataReader? _prevReader;
+    private CommandType _commandType = CommandType.Text;
+    private bool _designTimeVisible;
+    private UpdateRowSource _updatedRowSource = UpdateRowSource.Both;
+    private DbTransaction? _transaction;
 
     [AllowNull]
     public override string CommandText { get; set; } = string.Empty;
@@ -116,18 +149,41 @@ public sealed class NzCommand : DbCommand
             _connection!.CommandTimeout = TimeSpan.FromSeconds(value);
         }
     }
-    public override CommandType CommandType { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    public override CommandType CommandType
+    {
+        get => _commandType;
+        set
+        {
+            if (value != CommandType.Text)
+            {
+                throw new NotSupportedException("Only CommandType.Text is supported.");
+            }
+            _commandType = value;
+        }
+    }
     protected override DbConnection? DbConnection 
     {
         get => _connection;
         set => _connection = (NzConnection)value!;
     }
 
-    protected override DbParameterCollection DbParameterCollection => throw new NotImplementedException();
+    protected override DbParameterCollection DbParameterCollection => throw new NotSupportedException("DbParameterCollection is not supported.");
 
-    protected override DbTransaction? DbTransaction { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-    public override bool DesignTimeVisible { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-    public override UpdateRowSource UpdatedRowSource { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    protected override DbTransaction? DbTransaction
+    {
+        get => _transaction;
+        set => _transaction = value;
+    }
+    public override bool DesignTimeVisible
+    {
+        get => _designTimeVisible;
+        set => _designTimeVisible = value;
+    }
+    public override UpdateRowSource UpdatedRowSource
+    {
+        get => _updatedRowSource;
+        set => _updatedRowSource = value;
+    }
 
     private void Clear()
     {
@@ -144,7 +200,7 @@ public sealed class NzCommand : DbCommand
 
     protected override DbParameter CreateDbParameter()
     {
-        throw new NotImplementedException();
+        throw new NotSupportedException("DbParameter is not supported.");
     }
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
     {
@@ -174,9 +230,45 @@ public sealed class NzCommand : DbCommand
         }
     }
 
+    protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            Clear();
+            if (!_connection.InTransaction && !_connection.AutoCommit)
+            {
+                await _connection.ExecuteAsync(this, "begin", cancellationToken).ConfigureAwait(false);
+                _connection.InTransaction = true;
+            }
+            _prevReader = await _connection.ExecuteReaderAsync(this, CommandText, cancellationToken).ConfigureAwait(false);
+            _connection.SetState(ConnectionState.Open);
+            return _prevReader;
+        }
+        catch (Exception ex)
+        {
+            if (Connection is null)
+            {
+                throw new InterfaceException("Command closed", ex);
+            }
+            else if (_connection.IsBaseStreamNull)
+            {
+                throw new InterfaceException("Connection closed in Command Execute", ex);
+            }
+            throw;
+        }
+    }
+
     public override int ExecuteNonQuery()
     {
         Execute(CommandText);
+        return _recordsAffected;
+    }
+
+    public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await ExecuteAsync(CommandText, cancellationToken).ConfigureAwait(false);
         return _recordsAffected;
     }
 
@@ -190,9 +282,20 @@ public sealed class NzCommand : DbCommand
         return null;
     }
 
+    public override async Task<object?> ExecuteScalarAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var rdr = await ExecuteDbDataReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+        if (await rdr.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return rdr.GetValue(0);
+        }
+        return null;
+    }
+
     public override void Prepare()
     {
-        throw new NotImplementedException();
+        // no-op: server-side prepared statements are not exposed via ADO.NET parameters
     }
 }
 

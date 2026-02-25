@@ -304,6 +304,63 @@ public sealed class NzConnection : DbConnection
         }
     }
 
+    private async Task<Stream> InitializeAsync(string host, int port, bool useBufferedStream = true, bool setSocketBufferSizes = false, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (host is not null)
+            {
+                _socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                if (setSocketBufferSizes)
+                {
+                    _socket.ReceiveBufferSize = 65536;
+                    _socket.SendBufferSize = 65536;
+                }
+            }
+            else
+            {
+                throw new NetezzaException("one of host or unix_sock must be provided");
+            }
+
+            using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            connectCts.CancelAfter(ConnectionTimeoutDuration);
+            try
+            {
+                await _socket.ConnectAsync(host, port, connectCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new NetezzaException("Connection timeout");
+            }
+
+            var baseStream = new NetworkStream(_socket, ownsSocket: true);
+
+            if (_tcpKeepAlive)
+            {
+                _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+            }
+
+            return useBufferedStream
+                ? new BufferedStream(baseStream, _bufferSize)
+                : baseStream;
+        }
+        catch (OperationCanceledException)
+        {
+            _socket.Close();
+            throw;
+        }
+        catch (NetezzaException)
+        {
+            _socket.Close();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _socket.Close();
+            throw new InterfaceException("communication error", ex);
+        }
+    }
+
 #if NET9_0_OR_GREATER
     private static readonly Lock _cancelLock = new ();
 #else
@@ -423,6 +480,74 @@ public sealed class NzConnection : DbConnection
         return true;
     }
 
+    private async Task<bool> ConnSendQueryAsync(string dateStyle = "ISO", CancellationToken cancellationToken = default)
+    {
+        if (!await ExecuteAsync(_nzCommand, "set nz_encoding to 'utf8'", cancellationToken).ConfigureAwait(false))
+            return false;
+
+        string query = dateStyle switch
+        {
+            "MDY" => "set DateStyle to 'US'",
+            "DMY" => "set DateStyle to 'EUROPEAN'",
+            _ => "set DateStyle to 'ISO'"
+        };
+
+        if (!await ExecuteAsync(_nzCommand, query, cancellationToken).ConfigureAwait(false))
+            return false;
+
+        var systemArch = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
+        string procArch = systemArch == System.Runtime.InteropServices.Architecture.X64 ? "AMD64" : "other";
+
+        string clientInfo = $@"select version(), 
+        'Netezza Python Client Version {NzConnectionHelpers.NZPY_CLIENT_VERSION}', 
+        '{procArch}',
+        'OS Platform: {Environment.OSVersion}',
+        'OS Username: {Environment.UserName}'";
+
+        _nzCommand.CommandText = clientInfo;
+        await using var rdr = await _nzCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await rdr.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var row = new object[5];
+            rdr.GetValues(row);
+            _serverVersion = (row[0] as string) ?? "no version info";
+            _logger?.LogDebug("Version info: {row0}, {row1}, {row2}, {row3}, {row4}",
+                row[0], row[1], row[2], row[3], row[4]);
+        }
+
+        if (!await ExecuteAsync(_nzCommand, $"SET CLIENT_VERSION = '{NzConnectionHelpers.NZPY_CLIENT_VERSION}'", cancellationToken).ConfigureAwait(false))
+            return false;
+
+        _nzCommand.CommandText = @"select ascii(' ') as space, encoding as ccsid from _v_database where objid = current_db";
+        await using var rdr2 = await _nzCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await rdr2.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var row = new object[2];
+            rdr2.GetValues(row);
+            _logger?.LogDebug("Space: {row0}, CCSID: {row1}", row[0], row[1]);
+        }
+
+        _nzCommand.CommandText = @"select feature from _v_odbc_feature where spec_level = '3.5'";
+        await using var rdr3 = await _nzCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await rdr3.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var row = new object[1];
+            rdr3.GetValues(row);
+            _logger?.LogDebug("Feature: {row0}", row[0]);
+        }
+
+        _nzCommand.CommandText = "select identifier_case, current_catalog, current_user";
+        await using var rdr4 = await _nzCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await rdr4.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var row = new object[3];
+            rdr4.GetValues(row);
+            _logger?.LogDebug("Case: {row0}, Catalog: {row1}, User: {row2}", row[0], row[1], row[2]);
+        }
+
+        return true;
+    }
+
     private readonly Dictionary<string, string>? _pgOptions = null;
 
     private readonly SecurityLevelCode _securityLevel = SecurityLevelCode.PreferredUnsecured;
@@ -450,7 +575,22 @@ public sealed class NzConnection : DbConnection
 
     public void Commit()
     {
-        Execute(this._nzCommand, "commit");
+        if (this.InTransaction)
+        {
+            Execute(this._nzCommand, "commit");
+            InTransaction = false;
+            SetState(ConnectionState.Open);
+        }
+    }
+
+    public async Task CommitAsync(CancellationToken cancellationToken = default)
+    {
+        if (this.InTransaction)
+        {
+            await ExecuteAsync(this._nzCommand, "commit", cancellationToken).ConfigureAwait(false);
+            InTransaction = false;
+            SetState(ConnectionState.Open);
+        }
     }
 
     public void Rollback()
@@ -459,6 +599,17 @@ public sealed class NzConnection : DbConnection
         {
             Execute(this._nzCommand, "rollback");
             InTransaction = false;
+            SetState(ConnectionState.Open);
+        }
+    }
+
+    public async Task RollbackAsync(CancellationToken cancellationToken = default)
+    {
+        if (this.InTransaction)
+        {
+            await ExecuteAsync(this._nzCommand, "rollback", cancellationToken).ConfigureAwait(false);
+            InTransaction = false;
+            SetState(ConnectionState.Open);
         }
     }
 
@@ -509,10 +660,63 @@ public sealed class NzConnection : DbConnection
         _state = ConnectionState.Executing;
     }
 
+    private async Task PreExecutionAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
+    {
+        _error = null;
+        nzCommand._recordsAffected = -1;
+        nzCommand.NewPreparedStatement = new PreparedStatement();
+        nzCommand.NewPreparedStatement.Sql = query;
+        if (State != ConnectionState.Connecting)
+        {
+            await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+        }
+        if (query is not null)
+        {
+            RegenerateBuffer(10 + 4 * query.Length);
+        }
+        _tmp_buffer[0] = (byte)'P';
+        if (_commandNumber != -1)
+        {
+            _commandNumber += 1;
+            Core.IPack(_commandNumber, _tmp_buffer.AsSpan(1));
+        }
+        else
+        {
+            _tmp_buffer[1] = 0xFF;
+            _tmp_buffer[2] = 0xFF;
+            _tmp_buffer[3] = 0xFF;
+            _tmp_buffer[4] = 0xFF;
+        }
+
+        if (_commandNumber > 100000)
+        {
+            _commandNumber = 1;
+        }
+
+        int written = 5;
+        if (query != null)
+        {
+            written += Encoding.UTF8.GetBytes(query, _tmp_buffer.AsSpan(written));
+            _tmp_buffer[written] = 0;
+            written += 1;
+        }
+        await _stream.WriteAsync(_tmp_buffer.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        _logger?.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(_tmp_buffer, 0, written));
+        _state = ConnectionState.Executing;
+    }
+
     private byte[] Read(int length, byte[]? buffer = null)
     {
         byte[] buf = buffer ?? new byte[length];
         _stream.ReadExactly(buf, 0, length);
+        return buf;
+    }
+
+    private async ValueTask<byte[]> ReadAsync(int length, byte[]? buffer = null, CancellationToken cancellationToken = default)
+    {
+        byte[] buf = buffer ?? new byte[length];
+        await _stream.ReadExactlyAsync(buf.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
         return buf;
     }
     private void WriteSpan(Span<byte> buf)
@@ -520,9 +724,29 @@ public sealed class NzConnection : DbConnection
         _stream.Write(buf);
     }
 
+    private ValueTask WriteSpanAsync(ReadOnlyMemory<byte> buf, CancellationToken cancellationToken = default)
+    {
+        return _stream.WriteAsync(buf, cancellationToken);
+    }
+
     private void Flush()
     {
         _stream.Flush();
+    }
+
+    private Task FlushAsync(CancellationToken cancellationToken = default)
+    {
+        return _stream.FlushAsync(cancellationToken);
+    }
+
+    private async ValueTask SkipBytesAsync(int count, CancellationToken cancellationToken = default)
+    {
+        while (count > 0)
+        {
+            int chunkSize = Math.Min(count, _tmp_buffer.Length);
+            await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, chunkSize), cancellationToken).ConfigureAwait(false);
+            count -= chunkSize;
+        }
     }
 
     public delegate void NzNoticeEventHandler(object sender, NzNoticeEventArgs e);
@@ -551,12 +775,12 @@ public sealed class NzConnection : DbConnection
             Timeout= (int)ConnectionTimeoutDuration.TotalSeconds,
             LoggerFactory= _loggerFactory
         }.ConnectionString;
-        set => throw new NotImplementedException(); 
+        set => throw new NotSupportedException("Setting ConnectionString is not supported. Create a new NzConnection instance.");
     }
 
     public override string Database => _database;
 
-    public override string DataSource => throw new NotImplementedException();
+    public override string DataSource => _host;
 
     private string _serverVersion = "";
     public override string ServerVersion => _serverVersion;
@@ -601,6 +825,18 @@ public sealed class NzConnection : DbConnection
         }
     }
 
+    private CancellationTokenSource? CreateCommandTimeoutTokenSource(CancellationToken cancellationToken)
+    {
+        if (CommandTimeout <= TimeSpan.Zero || CommandTimeout == Timeout.InfiniteTimeSpan)
+        {
+            return null;
+        }
+
+        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        linkedCts.CancelAfter(CommandTimeout);
+        return linkedCts;
+    }
+
 
     public bool Execute(NzCommand nzCommand, string query)
     {
@@ -619,6 +855,35 @@ public sealed class NzConnection : DbConnection
         return response;
     }
 
+    public async Task<bool> ExecuteAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var timeoutCts = CreateCommandTimeoutTokenSource(cancellationToken);
+        var effectiveCancellationToken = timeoutCts?.Token ?? cancellationToken;
+
+        try
+        {
+            await PreExecutionAsync(nzCommand, query, effectiveCancellationToken).ConfigureAwait(false);
+            _nextRelatedFileStream = null!;
+
+            while (await DoNextStepAsync(nzCommand, effectiveCancellationToken).ConfigureAwait(false)) ;
+            var response = true;
+
+            if (_error != null)
+            {
+                throw new NetezzaException(_error);
+            }
+
+            return response;
+        }
+        catch (OperationCanceledException) when (timeoutCts is not null && timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            CancelQuery();
+            _error = "Command timeout";
+            throw new NetezzaException(_error);
+        }
+    }
+
     public NzDataReader ExecuteReader(NzCommand nzCommand, string query)
     {
         PreExecution(nzCommand, query);
@@ -630,6 +895,32 @@ public sealed class NzConnection : DbConnection
             throw new NetezzaException(_error);
         }
         return rdr;
+    }
+
+    public async Task<NzDataReader> ExecuteReaderAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var timeoutCts = CreateCommandTimeoutTokenSource(cancellationToken);
+        var effectiveCancellationToken = timeoutCts?.Token ?? cancellationToken;
+
+        try
+        {
+            await PreExecutionAsync(nzCommand, query, effectiveCancellationToken).ConfigureAwait(false);
+            _nextRelatedFileStream = null!;
+            var rdr = await NzDataReader.CreateAsync(nzCommand, effectiveCancellationToken).ConfigureAwait(false);
+            if (_error != null)
+            {
+                throw new NetezzaException(_error);
+            }
+
+            return rdr;
+        }
+        catch (OperationCanceledException) when (timeoutCts is not null && timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            CancelQuery();
+            _error = "Command timeout";
+            throw new NetezzaException(_error);
+        }
     }
 
     private int _lastResponse = -1;
@@ -673,12 +964,184 @@ public sealed class NzConnection : DbConnection
         return res;
     }
 
+    internal async ValueTask<bool> DoNextStepAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
+    {
+        if (_shouldReadByte)
+        {
+            await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
+        if (_error != null)
+        {
+            while (res && _shouldReadByte)
+            {
+                await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
+                res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
+            }
+            throw new NetezzaException(_error);
+        }
+        return res;
+    }
+
     internal void ReadNextResponseByte()
     {
         _lastResponse = _stream.ReadByte();
         _shouldReadByte = false;
     }
+
+    private async ValueTask<int> ReadByteAsync(CancellationToken cancellationToken = default)
+    {
+        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
+        return _tmp_buffer[0];
+    }
+
+    private async ValueTask<int> ReadInt32Async(CancellationToken cancellationToken = default)
+    {
+        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, 4), cancellationToken).ConfigureAwait(false);
+        return IUnpack(_tmp_buffer);
+    }
+
+    private async ValueTask<short> ReadInt16Async(CancellationToken cancellationToken = default)
+    {
+        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
+        return HUnpack(_tmp_buffer);
+    }
+
+    internal async ValueTask ReadNextResponseByteAsync(CancellationToken cancellationToken = default)
+    {
+        _lastResponse = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+        _shouldReadByte = false;
+    }
     private bool _shouldReadByte = true;
+
+    private void InitializeUnloadFileStream(string fileName)
+    {
+        try
+        {
+            _nextRelatedFileStream = new FileStream(fileName, FileMode.OpenOrCreate, FileAccess.Write);
+            _logger?.LogDebug("Successfully opened file: {Filename}", fileName);
+            byte[] buf = [0, 0, 0, 0];
+            WriteSpan(buf);
+            Flush();
+        }
+        catch (IOException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+        catch (ArgumentException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+        catch (NotSupportedException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+    }
+
+    private async Task InitializeUnloadFileStreamAsync(string fileName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            _nextRelatedFileStream = new FileStream(fileName, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 4096, useAsync: true);
+            _logger?.LogDebug("Successfully opened file: {Filename}", fileName);
+            byte[] buf = [0, 0, 0, 0];
+            await WriteSpanAsync(buf, cancellationToken).ConfigureAwait(false);
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (IOException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+        catch (ArgumentException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+        catch (NotSupportedException ex)
+        {
+            _logger?.LogWarning(ex, "Error while opening file");
+            throw new NetezzaException("Error while opening unload file", ex);
+        }
+    }
+
+    private void HandleExternalTableProtocolMessage()
+    {
+        switch (_lastResponse)
+        {
+            case (byte)'u':
+                PGUtil.Skip4Bytes(_stream, 10);
+                PGUtil.Skip4Bytes(_stream, 16);
+                int length = PGUtil.ReadInt32(_stream);
+                var fileNameBytes = Read(length);
+                string fileName = Encoding.UTF8.GetString(fileNameBytes, 0, length);
+                InitializeUnloadFileStream(fileName);
+                return;
+
+            case (byte)'U':
+                if (_nextRelatedFileStream is null)
+                {
+                    throw new NetezzaException("Unload file stream is not initialized.");
+                }
+                ReceiveAndWriteDataToExternal(_nextRelatedFileStream);
+                return;
+
+            case (byte)'l':
+                XferTable();
+                return;
+
+            case (byte)'x':
+                PGUtil.Skip4Bytes(_stream);
+                _logger?.LogWarning("Error operation cancel");
+                return;
+        }
+    }
+
+    private async Task HandleExternalTableProtocolMessageAsync(CancellationToken cancellationToken)
+    {
+        switch (_lastResponse)
+        {
+            case (byte)'u':
+                await SkipBytesAsync(10, cancellationToken).ConfigureAwait(false);
+                await SkipBytesAsync(16, cancellationToken).ConfigureAwait(false);
+                int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+                var fileNameBytes = await ReadAsync(length, cancellationToken: cancellationToken).ConfigureAwait(false);
+                string fileName = Encoding.UTF8.GetString(fileNameBytes, 0, length);
+                await InitializeUnloadFileStreamAsync(fileName, cancellationToken).ConfigureAwait(false);
+                return;
+
+            case (byte)'U':
+                if (_nextRelatedFileStream is null)
+                {
+                    throw new NetezzaException("Unload file stream is not initialized.");
+                }
+                await ReceiveAndWriteDataToExternalAsync(_nextRelatedFileStream, cancellationToken).ConfigureAwait(false);
+                return;
+
+            case (byte)'l':
+                await XferTableAsync(cancellationToken).ConfigureAwait(false);
+                return;
+
+            case (byte)'x':
+                await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+                _logger?.LogWarning("Error operation cancel");
+                return;
+        }
+    }
 
     private bool IntepretReturnedByte(NzCommand nzCommand)
     {
@@ -762,47 +1225,9 @@ public sealed class NzConnection : DbConnection
             //Thread.Sleep(50);
             //doContinue = true;
         }
-        else if (_lastResponse == (byte)'u')
+        else if (_lastResponse is (byte)'u' or (byte)'U' or (byte)'l' or (byte)'x')
         {
-            // unload - initialize application protocol
-            // in ODBC, the first 10 bytes are utilized to populate clientVersion, formatType and bufSize
-            // these are not needed in go lang, hence ignoring 10 bytes
-            PGUtil.Skip4Bytes(_stream, 10);
-            // Next 16 bytes are Reserved Bytes for future extension
-            PGUtil.Skip4Bytes(_stream, 16);
-                                           // Get the filename (specified in dataobject)
-            int length = PGUtil.ReadInt32(_stream);
-            var fnameBuf = Read(length);//this should be short
-            var finaName = Encoding.UTF8.GetString(fnameBuf,0,length);
-            try
-            {
-                _nextRelatedFileStream = new FileStream(finaName, FileMode.OpenOrCreate, FileAccess.Write);
-                _logger?.LogDebug("Successfully opened file: {Filename}", finaName);
-                // file open successfully, send status back to datawriter
-                //var buf = Core.IPack(0);
-                byte[] buf = [0, 0, 0, 0];
-                WriteSpan(buf);
-                Flush();
-            }
-            catch (Exception)
-            {
-                _logger?.LogWarning("Error while opening file");
-            }
-        }
-        else if (_lastResponse == (byte)'U')
-        {
-            // handle unload data
-            ReceiveAndWriteDataToExternal(_nextRelatedFileStream);
-        }
-        else if (_lastResponse == (byte)'l')
-        {
-            XferTable();
-        }
-        else if (_lastResponse == (byte)'x')
-        {
-            // handle Ext Tbl parser abort
-            PGUtil.Skip4Bytes(_stream);
-            _logger?.LogWarning("Error operation cancel");
+            HandleExternalTableProtocolMessage();
         }
         else if (_lastResponse == (byte)'e')
         {
@@ -853,6 +1278,128 @@ public sealed class NzConnection : DbConnection
         return true;
     }
 
+    private async ValueTask<bool> IntepretReturnedByteAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
+    {
+        _shouldReadByte = true;
+        _logger?.LogDebug("Backend response: {Response}", (char)_lastResponse);
+        await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+
+        if (_lastResponse == (byte)BackendMessageCode.CommandComplete)
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            HandleCommandComplete(data, length, nzCommand);
+            _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
+        }
+        else if (_lastResponse == (byte)BackendMessageCode.ReadyForQuery)
+        {
+            return false;
+        }
+        else if (_lastResponse == (byte)'L')
+        {
+            return false;
+        }
+        else if (_lastResponse == (byte)'0')
+        {
+        }
+        else if (_lastResponse == (byte)'A')
+        {
+        }
+        else if (_lastResponse == (byte)'P')
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
+        }
+        else if (_lastResponse == (byte)BackendMessageCode.ErrorResponse)
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            _error = Encoding.UTF8.GetString(data, 0, length);
+            _logger?.LogDebug("Response received from backend: {_error}", _error);
+        }
+        else if (_lastResponse == (byte)BackendMessageCode.RowDescription)
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            nzCommand.NewPreparedStatement ??= new PreparedStatement();
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            NzConnection.HandleRowDescription(data, nzCommand);
+        }
+        else if (_lastResponse == (byte)BackendMessageCode.DataRow)
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            HandleDataRow(data, nzCommand);
+        }
+        else if (_lastResponse == (byte)BackendMessageCode.RowDescriptionStandard)
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            _tupdesc = new DbosTupleDesc();
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            ResGetDbosColumnDescriptions(data);
+        }
+        else if (_lastResponse == (byte)BackendMessageCode.RowStandard)
+        {
+            await ResReadDbosTupleAsync(nzCommand, cancellationToken).ConfigureAwait(false);
+        }
+        else if (_lastResponse is (byte)'u' or (byte)'U' or (byte)'l' or (byte)'x')
+        {
+            await HandleExternalTableProtocolMessageAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else if (_lastResponse == (byte)'e')
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            var logDirBytes = await ReadAsync(length - 1, cancellationToken: cancellationToken).ConfigureAwait(false);
+            string logDir = Encoding.UTF8.GetString(logDirBytes);
+
+            _ = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+            var filenameBuf = new List<byte> { (byte)await ReadByteAsync(cancellationToken).ConfigureAwait(false) };
+            while (true)
+            {
+                var charByte = (byte)await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+                if (charByte == 0x00)
+                {
+                    break;
+                }
+                filenameBuf.Add(charByte);
+            }
+
+            string filename = Encoding.UTF8.GetString(filenameBuf.ToArray());
+            int logType = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            if (!await GetFileFromBEAsync(logDir, filename, logType, cancellationToken).ConfigureAwait(false))
+            {
+                _logger?.LogDebug("Error in writing file received from BE");
+            }
+        }
+        else if (_lastResponse == (byte)BackendMessageCode.NoticeResponse)
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            string notice = Encoding.UTF8.GetString(data, 0, length);
+            OnNoticeReceived(notice);
+            _logger?.LogDebug("Response received from backend: {Notice}", notice);
+        }
+        else if (_lastResponse == (byte)'I')
+        {
+            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            RegenerateBuffer(length);
+            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            string notice = Encoding.UTF8.GetString(data, 0, length);
+            OnNoticeReceived(notice);
+            _logger?.LogDebug("Response received from backend: {Notice}", notice);
+            nzCommand.AddRow([]);
+        }
+
+        return true;
+    }
+
 
     private void XferTable()
     {
@@ -883,63 +1430,175 @@ public sealed class NzConnection : DbConnection
         int blockSize = PGUtil.ReadInt32(_stream);
         _logger?.LogInformation("Format={Format} Block size={BlockSize} Host version={HostVersion}", format, blockSize, hostVersion);
 
+        int effectiveBlockSize = Math.Max(blockSize, 1);
         try
         {
-            using var filehandle = File.OpenRead(filename);
+            using var filehandle = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, Math.Max(effectiveBlockSize, 4096), useAsync: false);
 
             if (_logger ?.IsEnabled(LogLevel.Information) == true)
             {
                 _logger?.LogInformation("Successfully opened External file to read: {Filename}", filename);
             }           
 
-            byte[] bytesBuffer = ArrayPool<byte>.Shared.Rent(blockSize);
-            while (true)
+            byte[] bytesBuffer = ArrayPool<byte>.Shared.Rent(effectiveBlockSize);
+            try
             {
-                int bytesReaded = filehandle.Read(bytesBuffer, 0, blockSize);
-                if (bytesReaded == 0)
+                while (true)
                 {
-                    break;
+                    int bytesReaded = filehandle.Read(bytesBuffer, 0, effectiveBlockSize);
+                    if (bytesReaded == 0)
+                    {
+                        break;
+                    }
+
+                    Span<byte> dataBytes = bytesBuffer.AsSpan();
+                    dataBytes = dataBytes[..bytesReaded];
+
+                    if (blockSize < dataBytes.Length)
+                    {
+                        int diff = dataBytes.Length - blockSize;
+
+                        PGUtil.WriteInt32(_stream, Core.EXTAB_SOCK_DATA);
+                        PGUtil.WriteInt32(_stream, blockSize);
+                        WriteSpan(dataBytes[..blockSize]);
+                        Flush();
+
+                        PGUtil.WriteInt32(_stream, Core.EXTAB_SOCK_DATA);
+                        PGUtil.WriteInt32(_stream, diff);
+                        WriteSpan(dataBytes[blockSize..]);
+                        Flush();
+                    }
+                    else
+                    {
+                        PGUtil.WriteInt32(_stream, Core.EXTAB_SOCK_DATA);
+                        PGUtil.WriteInt32(_stream, dataBytes.Length);
+                        WriteSpan(dataBytes);
+                        Flush();
+                    }
+                    if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                    {
+                        _logger?.LogDebug("No. of bytes sent to BE: {BytesSent}", dataBytes.Length);
+                    }                
                 }
-
-                Span<byte> dataBytes = bytesBuffer.AsSpan();
-                dataBytes = dataBytes[..bytesReaded];
-
-                if (blockSize < dataBytes.Length)
-                {
-                    int diff = dataBytes.Length - blockSize;
-
-                    PGUtil.WriteInt32(_stream, Core.EXTAB_SOCK_DATA);
-                    PGUtil.WriteInt32(_stream, blockSize);
-                    WriteSpan(dataBytes[..blockSize]);
-                    Flush();
-
-                    PGUtil.WriteInt32(_stream, Core.EXTAB_SOCK_DATA);
-                    PGUtil.WriteInt32(_stream, diff);
-                    WriteSpan(dataBytes[blockSize..]);
-                    Flush();
-                }
-                else
-                {
-                    PGUtil.WriteInt32(_stream, Core.EXTAB_SOCK_DATA);
-                    PGUtil.WriteInt32(_stream, dataBytes.Length);
-                    WriteSpan(dataBytes);
-                    Flush();
-                }
-                if (_logger?.IsEnabled(LogLevel.Debug) == true)
-                {
-                    _logger?.LogDebug("No. of bytes sent to BE: {BytesSent}", dataBytes.Length);
-                }                
-
             }
-            ArrayPool<byte>.Shared.Return(bytesBuffer);
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(bytesBuffer);
+            }
+
             PGUtil.WriteInt32(_stream, Core.EXTAB_SOCK_DONE);
             Flush();
             _logger?.LogInformation("sent EXTAB_SOCK_DONE to reader");
-
         }
-        catch (Exception)
+        catch (IOException ex)
         {
-            _logger?.LogWarning("Error opening file");
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
+        }
+        catch (ArgumentException ex)
+        {
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
+        }
+        catch (NotSupportedException ex)
+        {
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
+        }
+    }
+
+    private async Task XferTableAsync(CancellationToken cancellationToken = default)
+    {
+        await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+        int clientVersion = 1;
+
+        byte charByte = (byte)await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+        var filenameBuf = new List<byte> { charByte };
+        while (true)
+        {
+            charByte = (byte)await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+            if (charByte == 0x00)
+            {
+                break;
+            }
+            filenameBuf.Add(charByte);
+        }
+
+        string filename = NzConnectionHelpers.ClientEncoding.GetString(filenameBuf.ToArray());
+        int hostVersion = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+        await PGUtil.WriteInt32Async(_stream, clientVersion, cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
+
+        int format = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+        int blockSize = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+        _logger?.LogInformation("Format={Format} Block size={BlockSize} Host version={HostVersion}", format, blockSize, hostVersion);
+
+        int effectiveBlockSize = Math.Max(blockSize, 1);
+        try
+        {
+            await using var filehandle = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, Math.Max(effectiveBlockSize, 4096), useAsync: true);
+
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
+            {
+                _logger?.LogInformation("Successfully opened External file to read: {Filename}", filename);
+            }
+
+            byte[] bytesBuffer = ArrayPool<byte>.Shared.Rent(effectiveBlockSize);
+            try
+            {
+                while (true)
+                {
+                    int bytesReaded = await filehandle.ReadAsync(bytesBuffer.AsMemory(0, effectiveBlockSize), cancellationToken).ConfigureAwait(false);
+                    if (bytesReaded == 0)
+                    {
+                        break;
+                    }
+
+                    ReadOnlyMemory<byte> dataBytes = bytesBuffer.AsMemory(0, bytesReaded);
+                    await PGUtil.WriteInt32Async(_stream, Core.EXTAB_SOCK_DATA, cancellationToken).ConfigureAwait(false);
+                    await PGUtil.WriteInt32Async(_stream, dataBytes.Length, cancellationToken).ConfigureAwait(false);
+                    await WriteSpanAsync(dataBytes, cancellationToken).ConfigureAwait(false);
+                    await FlushAsync(cancellationToken).ConfigureAwait(false);
+
+                    if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                    {
+                        _logger?.LogDebug("No. of bytes sent to BE: {BytesSent}", dataBytes.Length);
+                    }
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(bytesBuffer);
+            }
+
+            await PGUtil.WriteInt32Async(_stream, Core.EXTAB_SOCK_DONE, cancellationToken).ConfigureAwait(false);
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
+            _logger?.LogInformation("sent EXTAB_SOCK_DONE to reader");
+        }
+        catch (IOException ex)
+        {
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
+        }
+        catch (ArgumentException ex)
+        {
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
+        }
+        catch (NotSupportedException ex)
+        {
+            _logger?.LogWarning(ex, "Error opening file");
+            throw new NetezzaException("Error opening file", ex);
         }
     }
 
@@ -985,19 +1644,101 @@ public sealed class NzConnection : DbConnection
                 var data = Read(numBytes, _tmp_buffer);
                 if (status)
                 {
+                    int maxCharCount = NzConnectionHelpers.ClientEncoding.GetMaxCharCount(numBytes);
+                    char[] tmpChars = ArrayPool<char>.Shared.Rent(maxCharCount);
+                    try
+                    {
+                        int charsWritten = NzConnectionHelpers.ClientEncoding.GetChars(data, 0, numBytes, tmpChars, 0);
+                        writer.Write(tmpChars,0, charsWritten);
+                        writer.Flush();
+                        _logger?.LogInformation("Successfully written data into file: {FullPath}", fullpath);
+                    }
+                    catch (IOException ex)
+                    {
+                        _logger?.LogWarning(ex, "Error in writing data to file");
+                        status = false;
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        _logger?.LogWarning(ex, "Error in writing data to file");
+                        status = false;
+                    }
+                    finally
+                    {
+                        ArrayPool<char>.Shared.Return(tmpChars);
+                    }
+                }
+            }
+        }
+
+        return status;
+    }
+
+    private async Task<bool> GetFileFromBEAsync(string logDir, string filename, int logType, CancellationToken cancellationToken = default)
+    {
+        bool status = true;
+        string fullpath = Path.Combine(logDir, filename);
+
+        FileStream? fh = null;
+        if (logType == 1)
+        {
+            fullpath += ".nzlog";
+            fh = new FileStream(fullpath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true);
+        }
+        else if (logType == 2)
+        {
+            fullpath += ".nzbad";
+            fh = new FileStream(fullpath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true);
+        }
+        else if (logType == 3)
+        {
+            fullpath += ".nzstats";
+            fh = new FileStream(fullpath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true);
+        }
+        if (fh is null)
+        {
+            throw new NullReferenceException(nameof(fh));
+        }
+
+        await using (fh.ConfigureAwait(false))
+        {
+            using StreamWriter writer = new StreamWriter(fh, Encoding.UTF8);
+            while (true)
+            {
+                int numBytes = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+
+                if (numBytes == 0)
+                {
+                    break;
+                }
+                RegenerateBuffer(numBytes);
+                var data = await ReadAsync(numBytes, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+                if (status)
+                {
                     try
                     {
                         int maxCharCount = NzConnectionHelpers.ClientEncoding.GetMaxCharCount(numBytes);
                         char[] tmpChars = ArrayPool<char>.Shared.Rent(maxCharCount);
-                        int charsWritten = NzConnectionHelpers.ClientEncoding.GetChars(data, 0, numBytes, tmpChars, 0);
-                        writer.Write(tmpChars,0, charsWritten);
-                        writer.Flush();
-                        ArrayPool<char>.Shared.Return(tmpChars);
-                        _logger?.LogInformation("Successfully written data into file: {FullPath}", fullpath);
+                        try
+                        {
+                            int charsWritten = NzConnectionHelpers.ClientEncoding.GetChars(data, 0, numBytes, tmpChars, 0);
+                            await writer.WriteAsync(tmpChars, 0, charsWritten).ConfigureAwait(false);
+                            await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+                            _logger?.LogInformation("Successfully written data into file: {FullPath}", fullpath);
+                        }
+                        finally
+                        {
+                            ArrayPool<char>.Shared.Return(tmpChars);
+                        }
                     }
-                    catch (Exception)
+                    catch (IOException ex)
                     {
-                        _logger?.LogWarning("Error in writing data to file");
+                        _logger?.LogWarning(ex, "Error in writing data to file");
+                        status = false;
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        _logger?.LogWarning(ex, "Error in writing data to file");
                         status = false;
                     }
                 }
@@ -1010,6 +1751,11 @@ public sealed class NzConnection : DbConnection
 
     private void ReceiveAndWriteDataToExternal(FileStream fh)
     {
+        if (fh is null)
+        {
+            throw new NetezzaException("Unload file stream is not initialized.");
+        }
+
         PGUtil.Skip4Bytes(_stream);
 
         while (true)
@@ -1020,29 +1766,33 @@ public sealed class NzConnection : DbConnection
             {
                 status = PGUtil.ReadInt32(_stream);
             }
-            catch (Exception)
+            catch (IOException ex)
             {
-                _logger?.LogWarning("Error while retrieving status, closing unload file");
+                _logger?.LogWarning(ex, "Error while retrieving status, closing unload file");
                 fh.Close();
-                return;
+                throw new NetezzaException("Error while retrieving unload status", ex);
             }
 
             if (status == Core.EXTAB_SOCK_DATA)
             {
                 // get number of bytes in block
                 int numBytes = PGUtil.ReadInt32(_stream);
+                byte[] bytes = ArrayPool<byte>.Shared.Rent(numBytes);
                 try
                 {
-                    byte[] bytes = ArrayPool<byte>.Shared.Rent(numBytes);
                     bytes = Read(numBytes, bytes);
                     fh.Write(bytes, 0, numBytes);
                     fh.Flush();
-                    ArrayPool<byte>.Shared.Return(bytes);
                     _logger?.LogInformation("Successfully written data into file");
                 }
-                catch (Exception)
+                catch (IOException ex)
                 {
-                    _logger?.LogWarning("Error in writing data to file");
+                    _logger?.LogWarning(ex, "Error in writing data to file");
+                    throw new NetezzaException("Error in writing data to unload file", ex);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(bytes);
                 }
                 continue;
             }
@@ -1069,12 +1819,90 @@ public sealed class NzConnection : DbConnection
 
                 fh.Close();
                 _logger?.LogDebug("unload - done receiving data");
-                return;
+                throw new NetezzaException($"Unload error: {errorMsg}. Object: {errorObject}");
             }
             else
             {
                 fh.Close();
-                return;
+                throw new NetezzaException($"Unknown unload status code: {status}");
+            }
+        }
+    }
+
+    private async Task ReceiveAndWriteDataToExternalAsync(FileStream fh, CancellationToken cancellationToken = default)
+    {
+        if (fh is null)
+        {
+            throw new NetezzaException("Unload file stream is not initialized.");
+        }
+
+        await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+
+        while (true)
+        {
+            int status;
+            try
+            {
+                status = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            }
+            catch (IOException ex)
+            {
+                _logger?.LogWarning(ex, "Error while retrieving status, closing unload file");
+                await fh.DisposeAsync().ConfigureAwait(false);
+                throw new NetezzaException("Error while retrieving unload status", ex);
+            }
+
+            if (status == Core.EXTAB_SOCK_DATA)
+            {
+                int numBytes = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    byte[] bytes = ArrayPool<byte>.Shared.Rent(numBytes);
+                    try
+                    {
+                        await _stream.ReadExactlyAsync(bytes.AsMemory(0, numBytes), cancellationToken).ConfigureAwait(false);
+                        await fh.WriteAsync(bytes.AsMemory(0, numBytes), cancellationToken).ConfigureAwait(false);
+                        await fh.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(bytes);
+                    }
+                    _logger?.LogInformation("Successfully written data into file");
+                }
+                catch (IOException ex)
+                {
+                    _logger?.LogWarning(ex, "Error in writing data to file");
+                    throw new NetezzaException("Error in writing data to unload file", ex);
+                }
+                continue;
+            }
+
+            if (status == Core.EXTAB_SOCK_DONE)
+            {
+                await fh.DisposeAsync().ConfigureAwait(false);
+                _logger?.LogInformation("unload - done receiving data");
+                break;
+            }
+
+            if (status == Core.EXTAB_SOCK_ERROR)
+            {
+                short len = await ReadInt16Async(cancellationToken).ConfigureAwait(false);
+                string errorMsg = NzConnectionHelpers.ClientEncoding.GetString(await ReadAsync(len, cancellationToken: cancellationToken).ConfigureAwait(false));
+                len = await ReadInt16Async(cancellationToken).ConfigureAwait(false);
+                string errorObject = NzConnectionHelpers.ClientEncoding.GetString(await ReadAsync(len, cancellationToken: cancellationToken).ConfigureAwait(false));
+
+                _logger?.LogWarning("unload - ErrorMsg: {ErrorMsg}", errorMsg);
+                _logger?.LogWarning("unload - ErrorObj: {ErrorObject}", errorObject);
+
+                await fh.DisposeAsync().ConfigureAwait(false);
+                _logger?.LogDebug("unload - done receiving data");
+                throw new NetezzaException($"Unload error: {errorMsg}. Object: {errorObject}");
+            }
+            else
+            {
+                await fh.DisposeAsync().ConfigureAwait(false);
+                throw new NetezzaException($"Unknown unload status code: {status}");
             }
         }
     }
@@ -1175,6 +2003,28 @@ public sealed class NzConnection : DbConnection
         RegenerateBuffer(length);
         byte[] data = Read(length, _tmp_buffer);
         _logger?.LogDebug("Actual message is: {Data}", BitConverter.ToString(data,0,length));
+
+        ParseDbosTupleData(nzCommand, data, numFields);
+    }
+
+    private async ValueTask ResReadDbosTupleAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
+    {
+        int numFields = _tupdesc.NumFields;
+        int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+
+        _logger?.LogDebug("Length of the message from backend: {Length}", length);
+        length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+        _logger?.LogDebug("Length of the message from backend: {Length}", length);
+
+        RegenerateBuffer(length);
+        byte[] data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+        _logger?.LogDebug("Actual message is: {Data}", BitConverter.ToString(data, 0, length));
+
+        ParseDbosTupleData(nzCommand, data, numFields);
+    }
+
+    private void ParseDbosTupleData(NzCommand nzCommand, byte[] data, int numFields)
+    {
 
         if (_row is null || _row.Length < numFields)
         {
@@ -1358,7 +2208,6 @@ public sealed class NzConnection : DbConnection
         }
 
         nzCommand.AddRow(_row);
-
     }
 
 
@@ -1366,7 +2215,10 @@ public sealed class NzConnection : DbConnection
     {
         if (_tmp_buffer.Length < length)
         {
-            ArrayPool<byte>.Shared.Return(_tmp_buffer);
+            if (_tmp_buffer.Length > 0)
+            {
+                ArrayPool<byte>.Shared.Return(_tmp_buffer);
+            }
             _tmp_buffer = ArrayPool<byte>.Shared.Rent(length);
         }
     }
@@ -1779,12 +2631,41 @@ public sealed class NzConnection : DbConnection
 
     protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
     {
-        throw new NotImplementedException();
+        if (State != ConnectionState.Open)
+        {
+            throw new InvalidOperationException("Connection must be open to begin a transaction.");
+        }
+
+        if (isolationLevel != IsolationLevel.Unspecified && isolationLevel != IsolationLevel.ReadCommitted)
+        {
+            throw new NotSupportedException("Only IsolationLevel.ReadCommitted is supported.");
+        }
+
+        AutoCommit = false;
+        if (!InTransaction)
+        {
+            _nzCommand ??= (NzCommand)CreateCommand();
+            Execute(this._nzCommand, "begin");
+            InTransaction = true;
+        }
+        SetState(ConnectionState.Open);
+
+        return new NzTransaction(this, IsolationLevel.ReadCommitted);
     }
 
     public override void ChangeDatabase(string databaseName)
     {
-        throw new NotImplementedException();
+        if (string.IsNullOrWhiteSpace(databaseName))
+        {
+            throw new ArgumentException("Database name cannot be null or empty.", nameof(databaseName));
+        }
+
+        if (string.Equals(databaseName, _database, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        throw new NotSupportedException("Changing database for an existing NzConnection is not supported. Create a new connection.");
     }
 
     public override void Close()
@@ -1796,7 +2677,31 @@ public sealed class NzConnection : DbConnection
         _socket = null!;
         _nzCommand = null!;
         _state = ConnectionState.Closed;
-        ArrayPool<byte>.Shared.Return(_tmp_buffer);
+        if (_tmp_buffer.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_tmp_buffer);
+            _tmp_buffer = [];
+        }
+    }
+
+    public override async Task CloseAsync()
+    {
+        if (_stream is not null)
+        {
+            await _stream.DisposeAsync().ConfigureAwait(false);
+            _stream = null!;
+        }
+
+        _socket?.Dispose();
+        _socket = null!;
+        _nzCommand = null!;
+        _state = ConnectionState.Closed;
+
+        if (_tmp_buffer.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_tmp_buffer);
+            _tmp_buffer = [];
+        }
     }
 
     private NzCommand _nzCommand = null!;
@@ -1829,6 +2734,10 @@ public sealed class NzConnection : DbConnection
     }
     public void Open(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, bool useBufferedStream = true, bool setSocketBufferSizes = false)
     {
+        if (_tmp_buffer.Length == 0)
+        {
+            _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
+        }
         _state = ConnectionState.Connecting;
         _stream = Initialize(_host, _port, useBufferedStream, setSocketBufferSizes);
         Handshake handShake = new(_socket, _stream, _host, _sslCerFilePath, _loggerFactory)
@@ -1849,6 +2758,47 @@ public sealed class NzConnection : DbConnection
 
         _nzCommand = (NzCommand)CreateCommand();
         if (!ConnSendQuery())
+        {
+            _logger?.LogWarning("Error sending initial setup queries");
+        }
+        _commandNumber = 0;
+
+        InTransaction = false;
+        _state = ConnectionState.Open;
+    }
+
+    public override Task OpenAsync(CancellationToken cancellationToken)
+    {
+        return OpenAsync(ClientTypeId.SqlDotnet, cancellationToken);
+    }
+
+    public async Task OpenAsync(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, CancellationToken cancellationToken = default, bool useBufferedStream = true, bool setSocketBufferSizes = false)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_tmp_buffer.Length == 0)
+        {
+            _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
+        }
+        _state = ConnectionState.Connecting;
+        _stream = await InitializeAsync(_host, _port, useBufferedStream, setSocketBufferSizes, cancellationToken).ConfigureAwait(false);
+        Handshake handShake = new(_socket, _stream, _host, _sslCerFilePath, _loggerFactory)
+        {
+            NPSCLIENT_TYPE_PYTHON = clientVersionId
+        };
+        Stream? response = await handShake.StartupAsync(_database, _securityLevel, _user, _password, _pgOptions, cancellationToken).ConfigureAwait(false);
+        _backendKeyData = handShake.BackendKeyData;
+
+        if (response is not null)
+        {
+            _stream = response;
+        }
+        else
+        {
+            throw new NetezzaException("Error in handshake");
+        }
+
+        _nzCommand = (NzCommand)CreateCommand();
+        if (!await ConnSendQueryAsync(cancellationToken: cancellationToken).ConfigureAwait(false))
         {
             _logger?.LogWarning("Error sending initial setup queries");
         }

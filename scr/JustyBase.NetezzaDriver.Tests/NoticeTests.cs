@@ -1,6 +1,7 @@
 ﻿namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
+[Trait("Category", "Integration")]
 public class NoticeTests
 {
     public NoticeTests()

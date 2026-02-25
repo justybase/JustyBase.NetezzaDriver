@@ -1,14 +1,12 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace JustyBase.NetezzaDriver.Benchmarks;
 
 public static class Config
 {
-    public const string Host = "172.23.174.131";
-    public const int Port = 5480;
-    public const string DbName = "JUST_DATA";
-    public const string UserName = "admin";
-    public static string Password = Environment.GetEnvironmentVariable("NZ_DEV_PASSWORD") ?? throw new InvalidOperationException("Environment variable NZ_PASSWORD is not set.");
+    public static readonly string Host = Environment.GetEnvironmentVariable("NZ_DEV_HOST") ?? "192.168.0.144";
+    public static readonly int Port = int.TryParse(Environment.GetEnvironmentVariable("NZ_DEV_PORT"), out var port) ? port : 5480;
+    public static readonly string DbName = Environment.GetEnvironmentVariable("NZ_DEV_DB") ?? "JUST_DATA";
+    public static readonly string UserName = Environment.GetEnvironmentVariable("NZ_DEV_USER") ?? "admin";
+    public static readonly string Password = Environment.GetEnvironmentVariable("NZ_DEV_PASSWORD") ?? "password";
 }

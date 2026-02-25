@@ -19,12 +19,26 @@ public sealed class NzDataReader : DbDataReader
 
     private DataTable? _schemaTable;
 
-    public NzDataReader(NzCommand nzCommand)
+    public NzDataReader(NzCommand nzCommand) : this(nzCommand, initializeReader: true)
+    {
+    }
+
+    private NzDataReader(NzCommand nzCommand, bool initializeReader)
     {
         _nzCommand = nzCommand ?? throw new ArgumentNullException(nameof(nzCommand));
-        _nzConnection = (NzConnection)nzCommand.Connection ?? throw new ArgumentNullException(nameof(nzCommand.Connection));
+        _nzConnection = nzCommand.Connection as NzConnection ?? throw new ArgumentNullException(nameof(nzCommand.Connection));
 
-        InitializeReader();
+        if (initializeReader)
+        {
+            InitializeReader();
+        }
+    }
+
+    internal static async Task<NzDataReader> CreateAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
+    {
+        var reader = new NzDataReader(nzCommand, initializeReader: false);
+        await reader.InitializeReaderAsync(cancellationToken).ConfigureAwait(false);
+        return reader;
     }
 
     private void InitializeReader()
@@ -65,18 +79,95 @@ public sealed class NzDataReader : DbDataReader
         return false;//final stop!
     }
 
+    public override Task<bool> ReadAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_disposed || !_opened || _needsToBeNextResultCalled)
+        {
+            return Task.FromResult(false);
+        }
+
+        var readTask = ReadAsyncCore(cancellationToken);
+        if (readTask.IsCompletedSuccessfully)
+        {
+            return Task.FromResult(readTask.Result);
+        }
+
+        return readTask.AsTask();
+    }
+
+    private async ValueTask<bool> ReadAsyncCore(CancellationToken cancellationToken)
+    {
+        while (_opened = await _nzConnection.DoNextStepAsync(_nzCommand, cancellationToken).ConfigureAwait(false))
+        {
+            if (_nzConnection.NewRowReceived())
+            {
+                return true;
+            }
+            if (_nzConnection.NewRowDescriptionReceived())
+            {
+                await CheckIfRowsAreAvailableAsync(cancellationToken).ConfigureAwait(false);
+                _needsToBeNextResultCalled = true;
+                return false;
+            }
+        }
+        return false;
+    }
+
     public override void Close()
     {
         if (!_disposed && _opened)
         {
             base.Close();
-            // Drain remaining data
-            while (_opened = _nzConnection.DoNextStep(_nzCommand))
+            try
             {
-                // Empty loop body - just draining
+                while (_opened = _nzConnection.DoNextStep(_nzCommand))
+                {
+                }
+            }
+            catch (NetezzaException)
+            {
+                _opened = false;
             }
         }
     }
+
+    private async Task InitializeReaderAsync(CancellationToken cancellationToken = default)
+    {
+        while (_opened = await _nzConnection.DoNextStepAsync(_nzCommand, cancellationToken).ConfigureAwait(false))
+        {
+            if (_nzConnection.NewRowDescriptionReceived())
+            {
+                await CheckIfRowsAreAvailableAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            }
+        }
+    }
+
+    private async Task CloseAsyncCore(CancellationToken cancellationToken)
+    {
+        if (!_disposed && _opened)
+        {
+            base.Close();
+            try
+            {
+                while (_opened = await _nzConnection.DoNextStepAsync(_nzCommand, cancellationToken).ConfigureAwait(false))
+                {
+                }
+            }
+            catch (NetezzaException)
+            {
+                _opened = false;
+            }
+        }
+    }
+
+    internal Task CloseAsync(CancellationToken cancellationToken)
+        => CloseAsyncCore(cancellationToken);
+
+    public override Task CloseAsync()
+        => CloseAsyncCore(CancellationToken.None);
+
     protected override void Dispose(bool disposing)
     {
         if (!_disposed && disposing)
@@ -85,6 +176,16 @@ public sealed class NzDataReader : DbDataReader
             _disposed = true;
         }
         base.Dispose(disposing);
+    }
+
+    public override async ValueTask DisposeAsync()
+    {
+        if (!_disposed)
+        {
+            await CloseAsyncCore(CancellationToken.None).ConfigureAwait(false);
+            _disposed = true;
+        }
+        await base.DisposeAsync().ConfigureAwait(false);
     }
 
 
@@ -343,8 +444,43 @@ public sealed class NzDataReader : DbDataReader
         if (buffer != null && bufferOffset < 0) throw new ArgumentOutOfRangeException(nameof(bufferOffset));
         if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
 
-        // TODO: Implement with Span<byte> for better performance
-        throw new NotImplementedException("GetBytes method requires implementation");
+        var value = GetValue(ordinal);
+        if (value is DBNull)
+        {
+            return 0;
+        }
+
+        byte[] source = value switch
+        {
+            byte[] data => data,
+            string text => NzConnectionHelpers.ClientEncoding.GetBytes(text),
+            _ => throw new InvalidCastException($"Cannot cast column {ordinal} value of type '{value.GetType().Name}' to bytes")
+        };
+
+        if (buffer is null)
+        {
+            return source.Length;
+        }
+
+        if (bufferOffset > buffer.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bufferOffset));
+        }
+
+        if (length > buffer.Length - bufferOffset)
+        {
+            throw new ArgumentException("The sum of bufferOffset and length is larger than the buffer size.");
+        }
+
+        if (dataOffset >= source.Length)
+        {
+            return 0;
+        }
+
+        int available = source.Length - (int)dataOffset;
+        int toCopy = Math.Min(length, available);
+        source.AsSpan((int)dataOffset, toCopy).CopyTo(buffer.AsSpan(bufferOffset, toCopy));
+        return toCopy;
     }
 
     public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
@@ -356,8 +492,43 @@ public sealed class NzDataReader : DbDataReader
         if (buffer != null && bufferOffset < 0) throw new ArgumentOutOfRangeException(nameof(bufferOffset));
         if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
 
-        // TODO: Implement with Span<char> for better performance
-        throw new NotImplementedException("GetChars method requires implementation");
+        var value = GetValue(ordinal);
+        if (value is DBNull)
+        {
+            return 0;
+        }
+
+        string source = value switch
+        {
+            string text => text,
+            char[] chars => new string(chars),
+            _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty
+        };
+
+        if (buffer is null)
+        {
+            return source.Length;
+        }
+
+        if (bufferOffset > buffer.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bufferOffset));
+        }
+
+        if (length > buffer.Length - bufferOffset)
+        {
+            throw new ArgumentException("The sum of bufferOffset and length is larger than the buffer size.");
+        }
+
+        if (dataOffset >= source.Length)
+        {
+            return 0;
+        }
+
+        int available = source.Length - (int)dataOffset;
+        int toCopy = Math.Min(length, available);
+        source.AsSpan((int)dataOffset, toCopy).CopyTo(buffer.AsSpan(bufferOffset, toCopy));
+        return toCopy;
     }
 
     public override IEnumerator GetEnumerator()
@@ -427,6 +598,14 @@ public sealed class NzDataReader : DbDataReader
         return _opened;
     }
 
+    public override Task<bool> NextResultAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+        _needsToBeNextResultCalled = false;
+        return Task.FromResult(_opened);
+    }
+
     public bool ShouldContinue => _opened && !_disposed;
 
 
@@ -439,6 +618,17 @@ public sealed class NzDataReader : DbDataReader
         if (_hasRows && _nzConnection.NewRowDescriptionStandardReceived())
         {
             _opened = _nzConnection.DoNextStep(_nzCommand);
+        }
+    }
+
+    private async Task CheckIfRowsAreAvailableAsync(CancellationToken cancellationToken = default)
+    {
+        await _nzConnection.ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
+        _hasRows = !_nzConnection.IsCommandComplete();
+
+        if (_hasRows && _nzConnection.NewRowDescriptionStandardReceived())
+        {
+            _opened = await _nzConnection.DoNextStepAsync(_nzCommand, cancellationToken).ConfigureAwait(false);
         }
     }
 

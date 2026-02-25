@@ -3,6 +3,7 @@ using Xunit;
 
 namespace JustyBase.NetezzaDriver.Tests.Utility;
 
+[Trait("Category", "Unit")]
 public class PGUtilTests
 {
     [Fact]

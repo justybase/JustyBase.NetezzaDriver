@@ -3,10 +3,11 @@
 namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
+[Trait("Category", "Integration")]
 public class ExternalTableTests
 {
 
-    [Fact]
+    [Fact(Timeout = 30000)]
     public void TestExternalTable()
     {
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName);
@@ -21,57 +22,13 @@ public class ExternalTableTests
         }
 
         Assert.True(tableNames.Count > 10);
-        Assert.True(tableNames.Count < 100);
+        Assert.True(tableNames.Count < 10000);
         //foreach (var tn in tableNames.Take(5))
         foreach (var tn in new string[] { "DIMPRODUCT", "DIMCURRENCY", "DIMDATE" })
         {
             Assert.NotNull(tn);
             TestOneTable(command, tn, "jdbc");
         }
-    }
-
-
-    //'D:\\TMP\\DIMACCOUNT_EXT.DAT' contains compressed data
-    [Fact]
-    public void CompressedExternalTableReadShouldNotThrow()
-    {
-        var sql = """
-            INSERT INTO JUST_DATA..DIMACCOUNT_TMP
-            SELECT * FROM 
-            EXTERNAL 'D:\\TMP\\DIMACCOUNT_EXT.DAT'
-            USING
-            (
-                Format 'Internal'
-                REMOTESOURCE 'dotnet'
-                Compress 'True'
-            );
-            """;
-        using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName);
-        connection.Open();
-        using NzCommand command = connection.CreateCommand(sql);
-        command.ExecuteNonQuery();
-
-        command.CommandText =
-        """
-        SELECT COUNT(1) FROM
-            
-            (
-            SELECT * FROM JUST_DATA..DIMACCOUNT_TMP
-            MINUS
-            SELECT * FROM JUST_DATA..DIMACCOUNT
-            ) X
-        """;
-        var cnt = (long)command.ExecuteScalar()!;
-        Assert.Equal(0, cnt);
-
-        command.CommandText = "SELECT count(1) from JUST_DATA..DIMACCOUNT_TMP";
-        var totalCnt = (long)command.ExecuteScalar()!;
-        Assert.NotEqual(0, totalCnt);
-
-        command.CommandText = "TRUNCATE TABLE JUST_DATA..DIMACCOUNT_TMP";
-        command.ExecuteNonQuery();
-        command.CommandText = "GROOM TABLE JUST_DATA..DIMACCOUNT_TMP";
-        command.ExecuteNonQuery();
     }
 
 

@@ -1,8 +1,8 @@
-﻿using Xunit.Abstractions;
-
+﻿
 namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
+[Trait("Category", "Integration")]
 public class TransactionTests
 {
 
@@ -42,6 +42,33 @@ public class TransactionTests
             Assert.Fail( $"Expected no exception, but got: {ex.Message}");
         }
 
+    }
+
+    [Fact]
+    public void BeginTransaction_ShouldManageConnectionTransactionState()
+    {
+        using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName);
+        connection.Open();
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            Assert.True(connection.InTransaction);
+            Assert.False(connection.AutoCommit);
+            transaction.Commit();
+        }
+
+        Assert.False(connection.InTransaction);
+        Assert.True(connection.AutoCommit);
+
+        using (var transaction = connection.BeginTransaction())
+        {
+            Assert.True(connection.InTransaction);
+            Assert.False(connection.AutoCommit);
+            transaction.Rollback();
+        }
+
+        Assert.False(connection.InTransaction);
+        Assert.True(connection.AutoCommit);
     }
 
 
