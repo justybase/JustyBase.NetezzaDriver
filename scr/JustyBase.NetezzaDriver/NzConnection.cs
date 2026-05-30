@@ -778,7 +778,16 @@ public sealed class NzConnection : DbConnection
         NoticeReceived?.Invoke(this, new NzNoticeEventArgs(notice));
     }
 
-    public TimeSpan DefaultCommandTimeout { get; set; } = TimeSpan.FromSeconds(60);
+    private TimeSpan _defaultCommandTimeout = TimeSpan.FromSeconds(60);
+    public TimeSpan DefaultCommandTimeout 
+    { 
+        get => _defaultCommandTimeout; 
+        set 
+        { 
+            _defaultCommandTimeout = value; 
+            CommandTimeout = value; 
+        } 
+    }
     public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
     private NzMetadata? _metadata;

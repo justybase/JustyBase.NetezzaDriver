@@ -84,8 +84,10 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
     internal async Task ReturnAsync(NzConnection connection)
     {
+        var pid = connection.Pid;
         if (_disposed || connection.State != System.Data.ConnectionState.Open || IsConnectionExpired(connection))
         {
+            _active.TryRemove(pid, out _);
             await DisposeConnectionAsync(connection).ConfigureAwait(false);
             Interlocked.Decrement(ref _totalConnections);
             _semaphore.Release();
@@ -101,13 +103,13 @@ public sealed class NzConnectionPool : IAsyncDisposable
         }
         catch
         {
+            _active.TryRemove(pid, out _);
             await DisposeConnectionAsync(connection).ConfigureAwait(false);
             Interlocked.Decrement(ref _totalConnections);
             _semaphore.Release();
             return;
         }
 
-        var pid = connection.Pid;
         _active.TryRemove(pid, out _);
         _idle.Enqueue(connection);
         _semaphore.Release();
@@ -170,7 +172,8 @@ public sealed class NzConnectionPool : IAsyncDisposable
             }
         }
 
-        while (_totalConnections < _minPoolSize && _totalConnections < _maxPoolSize)
+        var currentTotal = Volatile.Read(ref _totalConnections);
+        while (currentTotal < _minPoolSize && currentTotal < _maxPoolSize)
         {
             try
             {
@@ -181,6 +184,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
             {
                 break;
             }
+            currentTotal = Volatile.Read(ref _totalConnections);
         }
     }
 
