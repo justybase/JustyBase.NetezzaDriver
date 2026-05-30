@@ -116,7 +116,7 @@ public sealed class Sylvan
         return str;
     }
 
-    [SkipLocalsInit]
+    //[SkipLocalsInit]
     public string GetString(ReadOnlySpan<byte> buffer, Encoding encoding)
     {
         int maxLength = encoding.GetMaxCharCount(buffer.Length);

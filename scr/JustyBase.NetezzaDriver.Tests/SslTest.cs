@@ -16,7 +16,7 @@ public class SslTest
     public void BasicTests()
     {
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName,
-            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"D:\DEV\Others\keys\server-cert.pem");
+            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"C:\DEV\DEV\Others\keys\server-cert.pem");
         //this cert file is invalid
         Assert.Throws<AuthenticationException>(() =>
         {
@@ -29,7 +29,7 @@ public class SslTest
     public void BasicTests2()
     {
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName,
-            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"D:\DEV\Others\keys\server-cert.pem", loggerFactory: new NullLoggerFactory());
+            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"C:\DEV\DEV\Others\keys\server-cert.pem", loggerFactory: new NullLoggerFactory());
         // Logger presence must not bypass TLS certificate validation.
         Assert.Throws<AuthenticationException>(() =>
         {

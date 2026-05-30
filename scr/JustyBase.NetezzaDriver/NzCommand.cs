@@ -36,6 +36,7 @@ public sealed class NzCommand : DbCommand
     }
 
     private NzConnection _connection;
+    private readonly NzParameterCollection _parameters = [];
 
     internal int _recordsAffected = -1;
 
@@ -75,17 +76,25 @@ public sealed class NzCommand : DbCommand
     /// <param name="operation"></param>
     /// <returns></returns>
     /// <exception cref="InterfaceException"></exception>
+    private string ResolveCommandText(string operation)
+    {
+        if (_parameters is not null && _parameters.Count > 0)
+            return NzParameterHelper.SubstituteParameters(operation, _parameters);
+        return operation;
+    }
+
     private NzCommand Execute(string operation)
     {
         try
         {
             Clear();
+            var resolvedSql = ResolveCommandText(operation);
             if (!_connection.InTransaction && !_connection.AutoCommit)
             {
                 _connection.Execute(this, "begin");
                 _connection.InTransaction = true;
             }
-            _connection.Execute(this, operation);
+            _connection.Execute(this, resolvedSql);
             _connection.SetState(ConnectionState.Open);
         }
         catch (AttributeException ex)
@@ -109,12 +118,13 @@ public sealed class NzCommand : DbCommand
         try
         {
             Clear();
+            var resolvedSql = ResolveCommandText(operation);
             if (!_connection.InTransaction && !_connection.AutoCommit)
             {
                 await _connection.ExecuteAsync(this, "begin", cancellationToken).ConfigureAwait(false);
                 _connection.InTransaction = true;
             }
-            await _connection.ExecuteAsync(this, operation, cancellationToken).ConfigureAwait(false);
+            await _connection.ExecuteAsync(this, resolvedSql, cancellationToken).ConfigureAwait(false);
             _connection.SetState(ConnectionState.Open);
         }
         catch (AttributeException ex)
@@ -167,7 +177,8 @@ public sealed class NzCommand : DbCommand
         set => _connection = (NzConnection)value!;
     }
 
-    protected override DbParameterCollection DbParameterCollection => throw new NotSupportedException("DbParameterCollection is not supported.");
+    protected override DbParameterCollection DbParameterCollection => _parameters;
+    public new NzParameterCollection Parameters => _parameters;
 
     protected override DbTransaction? DbTransaction
     {
@@ -200,19 +211,20 @@ public sealed class NzCommand : DbCommand
 
     protected override DbParameter CreateDbParameter()
     {
-        throw new NotSupportedException("DbParameter is not supported.");
+        return new NzParameter();
     }
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
     {
         try
         {
             Clear();
+            var resolvedSql = ResolveCommandText(CommandText);
             if (!_connection.InTransaction && !_connection.AutoCommit)
             {
                 _connection.Execute(this, "begin");
                 _connection.InTransaction = true;
             }
-            _prevReader = _connection.ExecuteReader(this, CommandText);
+            _prevReader = _connection.ExecuteReader(this, resolvedSql);
             _connection.SetState(ConnectionState.Open);
             return _prevReader;
         }
@@ -236,12 +248,13 @@ public sealed class NzCommand : DbCommand
         try
         {
             Clear();
+            var resolvedSql = ResolveCommandText(CommandText);
             if (!_connection.InTransaction && !_connection.AutoCommit)
             {
                 await _connection.ExecuteAsync(this, "begin", cancellationToken).ConfigureAwait(false);
                 _connection.InTransaction = true;
             }
-            _prevReader = await _connection.ExecuteReaderAsync(this, CommandText, cancellationToken).ConfigureAwait(false);
+            _prevReader = await _connection.ExecuteReaderAsync(this, resolvedSql, cancellationToken).ConfigureAwait(false);
             _connection.SetState(ConnectionState.Open);
             return _prevReader;
         }

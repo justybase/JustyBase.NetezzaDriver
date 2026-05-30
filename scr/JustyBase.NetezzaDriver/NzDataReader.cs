@@ -1,4 +1,5 @@
 ﻿using System.Collections;
+using System.Collections.ObjectModel;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
@@ -712,6 +713,121 @@ public sealed class NzDataReader : DbDataReader
         }
 
         return _schemaTable;
+    }
+
+    public ReadOnlyCollection<DbColumn> GetColumnSchema()
+    {
+        ThrowIfDisposed();
+        var columns = new List<DbColumn>(FieldCount);
+        for (int i = 0; i < FieldCount; i++)
+        {
+            var fd = _nzCommand.NewPreparedStatement!.Description![i];
+            var declaredTypeName = BuildDeclaredTypeName(i, fd);
+            var col = new NzDbColumn(
+                columnName: fd.Name,
+                columnOrdinal: i,
+                providerType: (int)fd.TypeOID,
+                typeModifier: fd.TypeModifier,
+                dataType: fd.Type,
+                dataTypeName: fd.Type.Name,
+                columnSize: GetColumnSize(i, fd),
+                numericPrecision: GetNumericPrecision(i, fd),
+                numericScale: GetNumericScale(i, fd),
+                allowDBNull: _nzConnection.IsColumnNullable(i),
+                baseColumnName: fd.Name,
+                baseServerName: _nzConnection.DataSource,
+                declaredTypeName: declaredTypeName
+            );
+            columns.Add(col);
+        }
+        return columns.AsReadOnly();
+    }
+
+    public int GetProviderType(int ordinal)
+    {
+        ValidateOrdinal(ordinal);
+        var fd = _nzCommand.NewPreparedStatement!.Description![ordinal];
+        return (int)fd.TypeOID;
+    }
+
+    public string GetDeclaredTypeName(int ordinal)
+    {
+        ValidateOrdinal(ordinal);
+        var fd = _nzCommand.NewPreparedStatement!.Description![ordinal];
+        return BuildDeclaredTypeName(ordinal, fd);
+    }
+
+    private static int GetColumnSize(int ordinal, FieldDescription fd)
+    {
+        if (fd.TypeSize != -1)
+            return fd.TypeSize;
+        if (fd.TypeModifier > 16)
+            return fd.TypeModifier - 16;
+        return 0;
+    }
+
+    private static int? GetNumericPrecision(int ordinal, FieldDescription fd)
+    {
+        if (fd.TypeOID == 1700 && fd.TypeModifier > 16)
+        {
+            var normalized = fd.TypeModifier - 16;
+            return normalized >> 16;
+        }
+        return null;
+    }
+
+    private static int? GetNumericScale(int ordinal, FieldDescription fd)
+    {
+        if (fd.TypeOID == 1700 && fd.TypeModifier > 16)
+        {
+            var normalized = fd.TypeModifier - 16;
+            return normalized & 0xFFFF;
+        }
+        return null;
+    }
+
+    private static string BuildDeclaredTypeName(int ordinal, FieldDescription fd)
+    {
+        var typeName = fd.TypeOID switch
+        {
+            16 => "BOOLEAN",
+            20 => "BIGINT",
+            21 => "SMALLINT",
+            23 => "INTEGER",
+            25 => "TEXT",
+            700 => "REAL",
+            701 => "DOUBLE",
+            702 => "ABSTIME",
+            1042 => "CHAR",
+            1043 => "VARCHAR",
+            1082 => "DATE",
+            1083 => "TIME",
+            1114 => "TIMESTAMP",
+            1184 => "TIMESTAMPTZ",
+            1186 => "INTERVAL",
+            1700 => "NUMERIC",
+            2500 => "BYTEINT",
+            2522 => "NCHAR",
+            2530 => "NVARCHAR",
+            _ => fd.Type.Name.ToUpperInvariant()
+        };
+
+        if (fd.TypeOID == 1700 && fd.TypeModifier > 16)
+        {
+            var normalized = fd.TypeModifier - 16;
+            var prec = normalized >> 16;
+            var scale = normalized & 0xFFFF;
+            if (prec > 0)
+                return $"NUMERIC({prec},{scale})";
+        }
+
+        if (fd.TypeOID is 1042 or 1043 or 2522 or 2530 && fd.TypeModifier > 16)
+        {
+            var len = fd.TypeModifier - 16;
+            return $"{typeName}({len})";
+        }
+
+        return typeName;
     }
 }
 

@@ -6,7 +6,7 @@
 	<IsAotCompatible>true</IsAotCompatible>
 	<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 	<Title>Pure C# driver for IBM Netezza database</Title>
-	<Version>1.5.0</Version>
+	<Version>1.6.0</Version>
 	<Description>JustyBase.NetezzaDriver is a .NET library for interacting with IBM Netezza Performance Server databases. It provides a set of classes and methods to facilitate database connections, command execution, and data retrieval. Code is is based on nzpy and npgsql</Description>
 	<PackageProjectUrl>https://github.com/KrzysztofDusko/JustyBase.NetezzaDriver</PackageProjectUrl>
 	<PackageReadmeFile>README.md</PackageReadmeFile>
@@ -16,7 +16,7 @@
 	<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
 	 <!--<PackageLicenseFile>LICENSE</PackageLicenseFile>-->
 	<PackageRequireLicenseAcceptance>True</PackageRequireLicenseAcceptance>
-	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	<!--<AllowUnsafeBlocks>true</AllowUnsafeBlocks>-->
   </PropertyGroup>
 
   <ItemGroup>
@@ -46,7 +46,7 @@
 
 	<!-- For .NET 10 -->
 	<ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.3" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
 	</ItemGroup>
 
 </Project>

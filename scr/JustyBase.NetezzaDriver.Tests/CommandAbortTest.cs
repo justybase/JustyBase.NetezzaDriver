@@ -26,7 +26,7 @@ public class CommandAbortTest
     [Fact]
     public void AbortTestWithSSL()
     {
-        using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"D:\DEV\Others\keys\server-cert.pem", loggerFactory: new NullLoggerFactory());
+        using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"C:\DEV\DEV\Others\keys\server-cert.pem", loggerFactory: new NullLoggerFactory());
         Assert.Throws<AuthenticationException>(() => connection.Open());
     }
 

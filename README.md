@@ -1,182 +1,280 @@
-# JustyBase.NetezzaDriver 
-JustyBase.NetezzaDriver is a .NET library for interacting with IBM Netezza Performance Server databases. It provides a set of classes and methods to facilitate database connections, command execution, and data retrieval.
-Code is based on [nzpy](https://github.com/IBM/nzpy) and [npgsql](https://github.com/npgsql/npgsql)
+# JustyBase.NetezzaDriver
 
+[![NuGet](https://img.shields.io/nuget/v/JustyBase.NetezzaDriver)](https://www.nuget.org/packages/JustyBase.NetezzaDriver)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-512BD4)](https://dotnet.microsoft.com/)
 
-## Features
-* Connect to Netezza databases using NzConnection.
-* Execute SQL commands and queries with NzCommand.
-* Read data using NzDataReader.
-* Async ADO.NET API (`OpenAsync`, `ExecuteReaderAsync`, `ReadAsync`, `ExecuteScalarAsync`, `CloseAsync`).
-* Support for various Netezza data types.
-* Secure connections with SSL/TLS.
+A **pure C# ADO.NET driver** for IBM Netezza Performance Server (NPS) — no native dependencies, no ODBC bridge. The code is based on [nzpy](https://github.com/IBM/nzpy) (Python) and [npgsql](https://github.com/npgsql/npgsql) (PostgreSQL).
 
-## ADO.NET support snapshot
-- `NzConnection.BeginTransaction()` supports `IsolationLevel.ReadCommitted` (`IsolationLevel.Unspecified` is accepted and treated as `ReadCommitted`).
-- `NzConnection.DataSource` is implemented.
-- `NzConnection.ChangeDatabase(...)` is intentionally not supported (create a new connection).
-- `NzCommand` supports `CommandType.Text`; parameter APIs (`DbParameterCollection`, `CreateDbParameter`) are not supported.
-- `NzDataReader.GetBytes(...)` and `NzDataReader.GetChars(...)` are implemented.
+## Features at a glance
 
-## Behavioral Changes (from v1.4.0)
-Starting from version 1.4.0, the behavior when attempting to retrieve a `NULL` column value as a specific data type (e.g., `string`, `Int16`) has changed. Previously, such retrieval was possible, and users were required to explicitly check for `DBNull` using `IsDBNull`. Now, attempting to retrieve a `NULL` value as a non-nullable type will result in an `InvalidCastException`. This change ensures stricter type enforcement and aligns with common ADO.NET practices. Users should adjust their code to handle `NULL` values appropriately, for example, by checking `IsDBNull` before attempting to cast, or by using nullable types.
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Sync ADO.NET** (`Open`, `ExecuteReader`, `ExecuteScalar`) | ✅ | Full `DbConnection`, `DbCommand`, `DbDataReader` |
+| **Async ADO.NET** (`OpenAsync`, `ExecuteReaderAsync`, `ReadAsync`) | ✅ | CancellationToken support on all async methods |
+| **Parameterized queries** (`:name`, `@name`, `?`) | ✅ | C# to SQL literal rendering |
+| **Connection pooling** (`NzConnectionPool`) | ✅ | Configurable min/max, idle timeout, lifetime, maintenance |
+| **Transactions** (`BeginTransaction`, `Commit`, `Rollback`) | ✅ | `ReadCommitted` isolation, `AutoCommit` toggle |
+| **Column metadata** (`GetColumnSchema`, `GetDeclaredTypeName`) | ✅ | Extended via `NzDbColumn` with `ProviderType`, `TypeModifier` |
+| **Catalog introspection** (`NzMetadata`) | ✅ | Schemas, tables, columns, views, procs, sizes, sessions, search |
+| **Command timeout** (`CommandTimeout`, `DefaultCommandTimeout`) | ✅ | Per-command and per-connection |
+| **Query cancel** (`CancelQuery`, `CancellationToken`) | ✅ | Connection-level and token-based |
+| **SSL/TLS** | ✅ | Certificate validation, `SecurityLevelCode` flags |
+| **Netezza data types** | ✅ | Numeric, varchar, nchar, timestamp, date, time, interval, bytea, etc. |
+| **AOT-compatible** | ✅ | `IsAotCompatible=true` |
 
-## Requirements
-* .NET 8, .NET 9 or .NET 10
-* C# 12.0
 ## Installation
-JustyBase.NetezzaDriver is available as a NuGet package. You can install it using the following command:
+
 ```bash
 dotnet add package JustyBase.NetezzaDriver
 ```
 
-## Usage
-### Connecting to a Database
-To connect to a Netezza database, create an instance of NzConnection and open the connection:
-```c#
+The package targets **.NET 8**, **.NET 9**, and **.NET 10**.
+
+## Quick start
+
+### Synchronous
+
+```csharp
 using JustyBase.NetezzaDriver;
 
-var connection = new NzConnection("username", "password", "host", "database");
-connection.Open();
-```
+using var conn = new NzConnection("username", "password", "host", "database");
+conn.Open();
 
-### Async Usage
-```c#
-using JustyBase.NetezzaDriver;
-
-await using var connection = new NzConnection("username", "password", "host", "database");
-await connection.OpenAsync();
-
-await using var command = connection.CreateCommand("SELECT * FROM my_table");
-await using var reader = await command.ExecuteReaderAsync();
-while (await reader.ReadAsync())
-{
-    Console.WriteLine(reader.GetValue(0));
-}
-```
-
-### Async best practices
-- Przekazuj `CancellationToken` do `OpenAsync`, `ExecuteReaderAsync`, `ReadAsync`, `ExecuteScalarAsync`.
-- Używaj `await using` dla `NzConnection`, `NzCommand` i `NzDataReader`.
-- Nie mieszaj sync i async w tej samej ścieżce wykonania zapytania.
-
-### Executing a Command
-
-```c#
-var command = new NzCommand(connection)
-{
-    CommandText = "SELECT * FROM my_table"
-};
-
-using var reader = command.ExecuteReader();
+using var cmd = conn.CreateCommand("SELECT 'Hello from Netezza' AS msg");
+using var reader = cmd.ExecuteReader();
 while (reader.Read())
+    Console.WriteLine(reader.GetString(0));
+```
+
+### Asynchronous
+
+```csharp
+using JustyBase.NetezzaDriver;
+
+await using var conn = new NzConnection("username", "password", "host", "database");
+await conn.OpenAsync();
+
+await using var cmd = conn.CreateCommand("SELECT 'Hello async' AS msg");
+await using var reader = await cmd.ExecuteReaderAsync();
+while (await reader.ReadAsync())
+    Console.WriteLine(reader.GetString(0));
+```
+
+### Connection string
+
+```csharp
+// Constructors
+new NzConnection("user", "password", "host", "database");
+new NzConnection("user", "password", "host", "database", port: 5480);
+new NzConnection("user", "password", "host", "database", port: 5480,
+    securityLevel: SecurityLevelCode.OnlySecuredSession,
+    sslCerFilePath: @"C:\certs\netezza.pem");
+
+// Or via NzConnectionStringBuilder
+var builder = new NzConnectionStringBuilder
 {
-    for (int i = 0; i < reader.FieldCount; i++)
-    {
-        var value = reader.GetValue(i);
-        Console.WriteLine(value);
-    }
-}
-
-```
-### Handling Transactions
-To handle transactions, use the BeginTransaction, Commit, and Rollback methods:
-
-```c#
-        using NzConnection connection = new NzConnection("username", "password", "host", "database");
-        connection.Open();
-        using var nzCommand = connection.CreateCommand();
-
-        connection.AutoCommit = false; // autocommit is on by default. It can be turned off by using the autocommit property of the connection.
-
-        nzCommand.CommandText = "DROP TABLE T2 IF EXISTS";
-        nzCommand.ExecuteNonQuery();
-        nzCommand.CommandText = "create table t2(c1 numeric (10,5), c2 varchar(10),c3 nchar(5))";
-        nzCommand.ExecuteNonQuery();
-        nzCommand.CommandText = "insert into t2 values (123.54,'xcfd','xyz')";
-        nzCommand.ExecuteNonQuery();
-        connection.Rollback();
-        nzCommand.CommandText = "DROP TABLE T5 IF EXISTS";
-        nzCommand.ExecuteNonQuery();
-        nzCommand.CommandText = "create table t5(c1 numeric (10,5), c2 varchar(10),c3 nchar(5))";
-        nzCommand.ExecuteNonQuery();
-        nzCommand.CommandText = "insert into t5 values (123.54,'xcfd','xyz')";
-        nzCommand.ExecuteNonQuery();
-        connection.Commit();
-
-        nzCommand.CommandText = "SELECT * FROM T2";
-        Assert.Throws<NetezzaException>(() => nzCommand.ExecuteNonQuery());
-        try
-        {
-            nzCommand.CommandText = "SELECT * FROM T5";
-            nzCommand.ExecuteNonQuery();
-        }
-        catch (Exception ex)
-        {
-            Assert.Fail( $"Expected no exception, but got: {ex.Message}");
-        }
-```
-### Secure Connections
-TLS certificate validation is strict by default: certificates with TLS policy errors are rejected.
-
-To establish a secure connection, provide the SSL certificate file path when creating the NzConnection instance:
-```c#
-var connection = new NzConnection("username", "password", "host", "database", securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"C:\path\to\certificate.pem");
-connection.Open();
-```
-### Testing
-- Unit tests only:
-```bash
-dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Unit"
+    Host = "host", Database = "db", UserName = "user", Password = "pass",
+    Port = 5480, Pooling = true, MinPoolSize = 1, MaxPoolSize = 10
+};
+using var conn = new NzConnection(builder.ConnectionString);
+conn.Open();
 ```
 
-- Integration tests only:
-```bash
-dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Integration"
+## Parameterized queries
+
+Both **named** (`:name`, `@name`) and **positional** (`?`) parameters are supported. Parameters are rendered inline as SQL literals.
+
+```csharp
+// Named parameters
+await using var cmd = conn.CreateCommand(
+    "SELECT id, name FROM users WHERE age > :minAge AND city = :city");
+cmd.Parameters.AddWithValue(":minAge", 18);
+cmd.Parameters.AddWithValue(":city", "New York");
+await using var reader = await cmd.ExecuteReaderAsync();
+
+// Positional parameters
+await using var cmd2 = conn.CreateCommand(
+    "SELECT count(*) FROM users WHERE status = ?");
+cmd2.Parameters.Add(new NzParameter { Value = "active", IsPositional = true });
+var count = await cmd2.ExecuteScalarAsync();
 ```
-- Integration configuration uses environment variables: `NZ_DEV_HOST`, `NZ_DEV_PORT`, `NZ_DEV_DB`, `NZ_DEV_USER`, `NZ_DEV_PASSWORD`.
-- CI/CD workflow is intentionally not included in this repository.
 
-### Benchmark (sync vs async DataReader)
-Reader comparison (`ReadLargeDataReaderSync` vs `ReadLargeDataReaderAsync`) is available in `scr\JustyBase.NetezzaDriver.Benchmarks` (`AsyncReaderBench`) for multiple data-type scenarios.
+**C# to SQL type mapping:**
 
-Run:
+| C# type | SQL literal | Example |
+|---------|-------------|---------|
+| `null` / `DBNull` | `NULL` | `NULL` |
+| `bool` | `TRUE` / `FALSE` | `TRUE` |
+| `int`, `long`, `short` | number | `42` |
+| `float`, `double`, `decimal` | number | `3.14` |
+| `string` | `'escaped'` | `'O''Brien'` |
+| `DateTime` | `'yyyy-MM-dd HH:mm:ss.ffffff'` | `'2024-01-15 10:30:00.000000'` |
+| `DateOnly` | `'yyyy-MM-dd'` | `'2024-01-15'` |
+| `TimeOnly` | `'HH:mm:ss'` | `'14:30:00'` |
+| `TimeSpan` | `'HH:mm:ss'` | `'14:30:00'` |
+| `byte[]` | `x'hex'` | `x'deadbeef'` |
+| `Guid` | `'guid'` | `'...'` |
+
+See [docs/parameters.md](scr/docs/parameters.md) for details.
+
+## Connection pooling
+
+`NzConnectionPool` provides a thread-safe, semaphore-based pool.
+
+```csharp
+var pool = new NzConnectionPool(
+    host: "host", database: "db", user: "user", password: "pass",
+    port: 5480, minPoolSize: 1, maxPoolSize: 10,
+    connectionIdleTimeoutSeconds: 30);
+
+// Rent a connection (auto-return via await using)
+await using var pooled = await pool.RentAsync();
+await using var cmd = pooled.Connection.CreateCommand("SELECT 1");
+var result = await cmd.ExecuteScalarAsync();
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `minPoolSize` | `0` | Maintain at least this many idle connections |
+| `maxPoolSize` | `10` | Maximum concurrent connections |
+| `connectionIdleTimeoutSeconds` | `30` | Close idle connections after this |
+| `connectionLifetimeSeconds` | `0` | Max connection age (0 = unlimited) |
+
+The pool validates connections with `SELECT 1`, automatically rolls back open transactions on return, and runs a background maintenance timer every 30 seconds.
+
+See [docs/pooling.md](scr/docs/pooling.md) for details.
+
+## Column metadata
+
+`NzDataReader` exposes extended column metadata beyond the standard ADO.NET schema:
+
+```csharp
+// Standard ADO.NET
+var schema = reader.GetColumnSchema(); // ReadOnlyCollection<DbColumn>
+
+// Extended methods
+int oid = reader.GetProviderType(0);         // OID (e.g., 23 for INTEGER)
+string declared = reader.GetDeclaredTypeName(0); // "VARCHAR(32)", "NUMERIC(10,2)"
+```
+
+Each `NzDbColumn` in the schema includes `ProviderType`, `TypeModifier`, and `DeclaredTypeName`.
+
+## Catalog introspection
+
+`NzConnection.Meta` provides async access to Netezza system catalog views:
+
+```csharp
+var meta = conn.Meta;
+
+var schemas   = await meta.GetSchemasAsync();
+var tables    = await meta.GetTablesAsync("ADMIN");
+var columns   = await meta.GetColumnsAsync("DIMDATE", "ADMIN");
+var views     = await meta.GetViewsAsync();
+var procs     = await meta.GetProceduresAsync();
+var distKey   = await meta.GetDistributionKeyAsync("DIMDATE", "ADMIN");
+var sizes     = await meta.GetTableSizesAsync();
+var sessions  = await meta.GetSessionsAsync();
+var search    = await meta.SearchObjectsAsync("DIM%");
+```
+
+See [docs/metadata_api.md](scr/docs/metadata_api.md) for full API reference.
+
+## Timeout and cancel
+
+Per-command and per-connection timeout:
+
+```csharp
+// Per-connection default
+connection.DefaultCommandTimeout = TimeSpan.FromSeconds(30);
+
+// Per-command override
+cmd.CommandTimeout = 10; // seconds
+
+// CancellationToken
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+await using var reader = await cmd.ExecuteReaderAsync(cts.Token);
+
+// Connection-level cancel
+connection.CancelQuery();
+```
+
+See [docs/timeout_and_cancel.md](scr/docs/timeout_and_cancel.md) for details.
+
+## ADO.NET support
+
+| Interface / Class | Status | Notes |
+|------------------|--------|-------|
+| `DbConnection` (`NzConnection`) | ✅ | `Open`/`Close`, `OpenAsync`, `BeginTransaction`, `DataSource` |
+| `DbCommand` (`NzCommand`) | ✅ | `CommandType.Text`, parameterized queries |
+| `DbDataReader` (`NzDataReader`) | ✅ | Typed getters, `GetColumnSchema`, `GetBytes`, `GetChars` |
+| `DbParameter` / `DbParameterCollection` | ✅ | Named + positional parameters |
+| `DbTransaction` (`NzTransaction`) | ✅ | `Commit`, `Rollback` |
+| `IsolationLevel.ReadCommitted` | ✅ | Also accepts `Unspecified` as ReadCommitted |
+| `ChangeDatabase` | ❌ | Create a new connection instead |
+
+## Behavioral Changes (since v1.4.0)
+
+Starting from version 1.4.0, retrieving a `NULL` column value as a non-nullable type (e.g., `reader.GetString(0)` when the value is `DBNull`) throws `InvalidCastException` instead of returning a default value. Always check `reader.IsDBNull(i)` before calling typed getters, or use nullable types.
+
+## Security (SSL/TLS)
+
+TLS certificate validation is **strict by default** — certificates with TLS policy errors are rejected.
+
+```csharp
+var conn = new NzConnection("user", "password", "host", "database",
+    securityLevel: SecurityLevelCode.OnlySecuredSession,
+    sslCerFilePath: @"C:\path\to\certificate.pem");
+conn.Open();
+```
+
+## Benchmark (sync vs async DataReader)
+
+The benchmark project at `scr/JustyBase.NetezzaDriver.Benchmarks` compares sync (`ExecuteReader`) vs async (`ExecuteReaderAsync`) for large data reads.
+
 ```bash
 dotnet run -c Release -f net10.0 --project .\scr\JustyBase.NetezzaDriver.Benchmarks -- --filter *AsyncReaderBench*
 ```
-The benchmark reports execution time and memory allocations for sync and async variants.
-Connection settings can be overridden via environment variables: `NZ_DEV_HOST`, `NZ_DEV_PORT`, `NZ_DEV_DB`, `NZ_DEV_USER`, `NZ_DEV_PASSWORD`.
 
-Sample result (`net10.0`, BenchmarkDotNet):
+Sample results (net10.0, BenchmarkDotNet):
 
-| Scenario            | Sync Mean | Sync Allocated | Async Mean | Async Allocated | Time Ratio (Async/Sync) | Alloc Ratio (Async/Sync) |
-|-------------------- |----------:|---------------:|-----------:|----------------:|------------------------:|-------------------------:|
-| LargeMixed_500k     | 1.011 s   | 49.66 MB       | 1.006 s    | 52.27 MB        | 0.99x                   | 1.05x                    |
-| NumericScalars_300k | 2.158 s   | 29.76 MB       | 2.164 s    | 31.13 MB        | 1.00x                   | 1.05x                    |
-| TemporalNulls_300k  | 1.831 s   | 28.84 MB       | 1.867 s    | 30.12 MB        | 1.02x                   | 1.04x                    |
-| Textual_250k        | 1.465 s   | 29.33 MB       | 1.514 s    | 29.45 MB        | 1.03x                   | 1.00x                    |
+| Scenario            | Sync Mean | Sync Allocated | Async Mean | Async Allocated | Time Ratio | Alloc Ratio |
+|---------------------|----------:|---------------:|-----------:|----------------:|-----------:|------------:|
+| LargeMixed_500k     | 1.011 s   | 49.66 MB       | 1.006 s    | 52.27 MB        | 0.99x      | 1.05x       |
+| NumericScalars_300k | 2.158 s   | 29.76 MB       | 2.164 s    | 31.13 MB        | 1.00x      | 1.05x       |
+| TemporalNulls_300k  | 1.831 s   | 28.84 MB       | 1.867 s    | 30.12 MB        | 1.02x      | 1.04x       |
+| Textual_250k        | 1.465 s   | 29.33 MB       | 1.514 s    | 29.45 MB        | 1.03x      | 1.00x       |
 
-## License
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+Async overhead is negligible (~1–3% time, 0–5% allocations).
 
-This project is licensed under the Apache License, Version 2.0 - see the [LICENSE](LICENSE) file for details.
+## Testing
 
-```plaintext
-Copyright: 2025-2026 Krzysztof Duśko
-Copyright: 2019-2020 IBM, Inc
+```bash
+# Unit tests only
+dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Unit"
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+# Integration tests (requires live Netezza)
+dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Integration"
 ```
 
+Integration tests read connection settings from environment variables:
+- `NZ_DEV_HOST`, `NZ_DEV_PORT` (default 5480), `NZ_DEV_DB`, `NZ_DEV_USER`, `NZ_DEV_PASSWORD`
+
+## License
+
+Copyright 2025–2026 Krzysztof Duśko  
+Copyright 2019–2020 IBM, Inc.
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
 ## Contact
-For questions or support, please open an issue on GitHub.
+
+For questions, bug reports, or feature requests, [open an issue on GitHub](https://github.com/KrzysztofDusko/JustyBase.NetezzaDriver/issues).
+
+## Documentation
+
+- [Parameters](scr/docs/parameters.md) — Named and positional parameter reference
+- [Pooling](scr/docs/pooling.md) — Connection pool configuration and lifecycle
+- [Metadata API](scr/docs/metadata_api.md) — Catalog introspection methods
+- [Timeout & Cancel](scr/docs/timeout_and_cancel.md) — Command timeout, CancellationToken, CancelQuery
+- [Examples project](scr/examples/JustyBase.NetezzaDriver.Examples/) — Runnable C# examples

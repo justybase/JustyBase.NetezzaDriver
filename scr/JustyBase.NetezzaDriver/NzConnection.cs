@@ -52,6 +52,8 @@ public sealed class NzConnection : DbConnection
     private readonly string _host;
     private readonly int _port;
 
+    public DateTime CreatedAt { get; private set; } = DateTime.UtcNow;
+
     public const int NzTypeRecAddr = 1;
     public const int NzTypeDouble = 2;
     public const int NzTypeInt = 3;
@@ -150,7 +152,7 @@ public sealed class NzConnection : DbConnection
     /// <param name="connectionString">Connection string in format "User=value;Password=value" or "User=value;Password={value;with;semicolons}"</param>
     /// <returns>A tuple containing connection parameters</returns>
     /// <exception cref="NetezzaException">Thrown when mandatory parameters are missing or format is invalid</exception>
-    private static (string User, string Password, string Host, string? Database, int? Port, int? Timeout) ParseConnectionString(string connectionString)
+    private static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime) ParseConnectionString(string connectionString)
     {
         var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int position = 0;
@@ -239,7 +241,21 @@ public sealed class NzConnection : DbConnection
             timeout = parsedTimeout;
         }
 
-        return (user, password, host, database, port, timeout);
+        bool pooling = !parameters.TryGetValue("Pooling", out var poolingStr) || bool.Parse(poolingStr);
+        int minPoolSize = 0;
+        if (parameters.TryGetValue("MinPoolSize", out var minPoolStr))
+            int.TryParse(minPoolStr, out minPoolSize);
+        int maxPoolSize = 10;
+        if (parameters.TryGetValue("MaxPoolSize", out var maxPoolStr))
+            int.TryParse(maxPoolStr, out maxPoolSize);
+        int connectionIdleTimeout = 30;
+        if (parameters.TryGetValue("ConnectionIdleTimeout", out var idleStr))
+            int.TryParse(idleStr, out connectionIdleTimeout);
+        int connectionLifetime = 0;
+        if (parameters.TryGetValue("ConnectionLifetime", out var lifetimeStr))
+            int.TryParse(lifetimeStr, out connectionLifetime);
+
+        return (user, password, host, database, port, timeout, pooling, minPoolSize, maxPoolSize, connectionIdleTimeout, connectionLifetime);
     }
 
 
@@ -762,7 +778,12 @@ public sealed class NzConnection : DbConnection
         NoticeReceived?.Invoke(this, new NzNoticeEventArgs(notice));
     }
 
-    public TimeSpan CommandTimeout { get; set; } =  TimeSpan.FromSeconds(60);
+    public TimeSpan DefaultCommandTimeout { get; set; } = TimeSpan.FromSeconds(60);
+    public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    private NzMetadata? _metadata;
+    public NzMetadata Meta => _metadata ??= new NzMetadata(this);
+
     [AllowNull]
     public override string ConnectionString {
         get => new NzConnectionStringBuilder()
@@ -2765,6 +2786,7 @@ public sealed class NzConnection : DbConnection
 
         InTransaction = false;
         _state = ConnectionState.Open;
+        CreatedAt = DateTime.UtcNow;
     }
 
     public override Task OpenAsync(CancellationToken cancellationToken)
@@ -2806,6 +2828,7 @@ public sealed class NzConnection : DbConnection
 
         InTransaction = false;
         _state = ConnectionState.Open;
+        CreatedAt = DateTime.UtcNow;
     }
 
 }
