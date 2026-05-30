@@ -236,7 +236,7 @@ The benchmark project at `scr/JustyBase.NetezzaDriver.Benchmarks` compares sync 
 dotnet run -c Release -f net10.0 --project .\scr\JustyBase.NetezzaDriver.Benchmarks -- --filter *AsyncReaderBench*
 ```
 
-Sample results (net10.0, BenchmarkDotNet):
+Sample results (net10.0, BenchmarkDotNet, Windows 11):
 
 | Scenario            | Sync Mean | Sync Allocated | Async Mean | Async Allocated | Time Ratio | Alloc Ratio |
 |---------------------|----------:|---------------:|-----------:|----------------:|-----------:|------------:|
