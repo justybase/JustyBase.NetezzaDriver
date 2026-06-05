@@ -297,6 +297,8 @@ public sealed class NzConnection : DbConnection
                 //_socket.Connect(host, port);
             }
 
+            _socket.ReceiveTimeout = (int)ConnectionTimeoutDuration.TotalMilliseconds;
+
             var baseStream = new NetworkStream(_socket, ownsSocket: true);
             
 
@@ -348,6 +350,8 @@ public sealed class NzConnection : DbConnection
             {
                 throw new NetezzaException("Connection timeout");
             }
+
+            _socket.ReceiveTimeout = (int)ConnectionTimeoutDuration.TotalMilliseconds;
 
             var baseStream = new NetworkStream(_socket, ownsSocket: true);
 
