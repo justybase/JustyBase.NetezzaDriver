@@ -266,6 +266,33 @@ public class BasicTests : IDisposable
     }
 
     [Fact]
+    public void ChangeDatabase_ToConfiguredDatabase_ShouldKeepConnectionUsable()
+    {
+        var targetDatabase = Config.ChangeDatabaseDbName;
+
+        try
+        {
+            _nzNewConnection.ChangeDatabase(targetDatabase);
+
+            Assert.Equal(targetDatabase, _nzNewConnection.Database);
+
+            using var cmd = _nzNewConnection.CreateCommand();
+            cmd.CommandText = "SELECT CURRENT_CATALOG";
+            var currentCatalog = Assert.IsType<string>(cmd.ExecuteScalar());
+
+            Assert.Equal(targetDatabase, currentCatalog, ignoreCase: true);
+        }
+        finally
+        {
+            if (_nzNewConnection.State == System.Data.ConnectionState.Open
+                && !string.Equals(_nzNewConnection.Database, Config.DbName, StringComparison.OrdinalIgnoreCase))
+            {
+                _nzNewConnection.ChangeDatabase(Config.DbName);
+            }
+        }
+    }
+
+    [Fact]
     public void SampleCommandValidateMethod1()
     {
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName);

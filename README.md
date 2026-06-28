@@ -211,7 +211,7 @@ See [docs/timeout_and_cancel.md](scr/docs/timeout_and_cancel.md) for details.
 | `DbParameter` / `DbParameterCollection` | ✅ | Named + positional parameters |
 | `DbTransaction` (`NzTransaction`) | ✅ | `Commit`, `Rollback` |
 | `IsolationLevel.ReadCommitted` | ✅ | Also accepts `Unspecified` as ReadCommitted |
-| `ChangeDatabase` | ❌ | Create a new connection instead |
+| `ChangeDatabase` | ✅ | Uses Netezza `SET CATALOG`; not allowed during an active transaction |
 
 ## Behavioral Changes (since v1.4.0)
 

@@ -71,5 +71,16 @@ public class TransactionTests
         Assert.True(connection.AutoCommit);
     }
 
+    [Fact]
+    public void ChangeDatabase_WhenTransactionIsActive_ShouldThrowInvalidOperationException()
+    {
+        using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName);
+        connection.Open();
+
+        using var transaction = connection.BeginTransaction();
+
+        Assert.Throws<InvalidOperationException>(() => connection.ChangeDatabase(Config.DbName));
+    }
+
 
 }

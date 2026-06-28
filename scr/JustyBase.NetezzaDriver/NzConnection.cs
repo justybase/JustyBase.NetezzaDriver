@@ -46,7 +46,7 @@ public sealed class NzConnection : DbConnection
 
     public int Pid => _backendKeyData?.BackendProcessId ?? -1;
 
-    private readonly string _database;
+    private string _database;
     private readonly string _user;
     private readonly string _password;
     private readonly string _host;
@@ -2694,12 +2694,57 @@ public sealed class NzConnection : DbConnection
             throw new ArgumentException("Database name cannot be null or empty.", nameof(databaseName));
         }
 
+        var catalogName = GetValidCatalogIdentifier(databaseName);
+
+        if (State != ConnectionState.Open)
+        {
+            throw new InvalidOperationException("Connection must be open to change database.");
+        }
+
+        if (InTransaction)
+        {
+            throw new InvalidOperationException("Cannot change database while a transaction is active.");
+        }
+
         if (string.Equals(databaseName, _database, StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
 
-        throw new NotSupportedException("Changing database for an existing NzConnection is not supported. Create a new connection.");
+        _nzCommand ??= (NzCommand)CreateCommand();
+        Execute(_nzCommand, $"SET CATALOG {catalogName}");
+        _database = databaseName;
+        SetState(ConnectionState.Open);
+    }
+
+    private static string GetValidCatalogIdentifier(string databaseName)
+    {
+        var catalogName = databaseName.Trim();
+
+        if (!IsIdentifierStart(catalogName[0]))
+        {
+            throw new ArgumentException("Database name must be a valid unquoted identifier.", nameof(databaseName));
+        }
+
+        for (var i = 1; i < catalogName.Length; i++)
+        {
+            if (!IsIdentifierPart(catalogName[i]))
+            {
+                throw new ArgumentException("Database name must be a valid unquoted identifier.", nameof(databaseName));
+            }
+        }
+
+        return catalogName;
+    }
+
+    private static bool IsIdentifierStart(char c)
+    {
+        return c == '_' || char.IsAsciiLetter(c);
+    }
+
+    private static bool IsIdentifierPart(char c)
+    {
+        return c == '_' || c == '$' || char.IsAsciiLetterOrDigit(c);
     }
 
     public override void Close()
