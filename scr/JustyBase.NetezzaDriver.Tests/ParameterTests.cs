@@ -187,6 +187,71 @@ public class ParameterUnitTests
         Assert.Equal(ParameterDirection.Input, p.Direction);
         Assert.Throws<NotSupportedException>(() => p.Direction = ParameterDirection.Output);
     }
+
+    [Fact]
+    public void SubstituteParameters_AllowsNamedParametersBeforeCastSyntax()
+    {
+        var parameters = new NzParameterCollection();
+        parameters.AddWithValue(":val", 42);
+
+        var sql = NzParameterHelper.SubstituteParameters("SELECT :val::INTEGER", parameters);
+
+        Assert.Equal("SELECT 42::INTEGER", sql);
+    }
+
+    [Fact]
+    public void SubstituteParameters_ThrowsWhenNamedAndPositionalAreMixed()
+    {
+        var parameters = new NzParameterCollection();
+        parameters.AddWithValue(":val", 42);
+        parameters.Add(new NzParameter { Value = 7, IsPositional = true });
+
+        var ex = Assert.Throws<InvalidOperationException>(() => NzParameterHelper.SubstituteParameters("SELECT :val, ?", parameters));
+
+        Assert.Contains("cannot be mixed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SubstituteParameters_ThrowsWhenNamedParameterIsMissing()
+    {
+        var parameters = new NzParameterCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => NzParameterHelper.SubstituteParameters("SELECT :missing", parameters));
+
+        Assert.Contains(":missing", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SubstituteParameters_ThrowsWhenNamedParameterIsUnused()
+    {
+        var parameters = new NzParameterCollection();
+        parameters.AddWithValue(":unused", 42);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => NzParameterHelper.SubstituteParameters("SELECT 1", parameters));
+
+        Assert.Contains(":unused", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SubstituteParameters_ThrowsWhenPositionalParameterIsMissing()
+    {
+        var parameters = new NzParameterCollection();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => NzParameterHelper.SubstituteParameters("SELECT ?", parameters));
+
+        Assert.Contains("Missing value for SQL parameter '?'", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SubstituteParameters_ThrowsWhenPositionalParameterIsUnused()
+    {
+        var parameters = new NzParameterCollection();
+        parameters.Add(new NzParameter { Value = 42, IsPositional = true });
+
+        var ex = Assert.Throws<InvalidOperationException>(() => NzParameterHelper.SubstituteParameters("SELECT 1", parameters));
+
+        Assert.Contains("More positional parameter values", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 [Trait("Category", "Integration")]

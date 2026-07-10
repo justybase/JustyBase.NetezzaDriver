@@ -1,10 +1,14 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 
 namespace JustyBase.NetezzaDriver;
 
 public sealed class NzConnectionPool : IAsyncDisposable
 {
+    private readonly record struct IdleConnection(NzConnection Connection, DateTime ReturnedAtUtc);
+
+    private static readonly TimeSpan MaintenanceInterval = TimeSpan.FromSeconds(30);
+    private const int ValidationTimeoutSeconds = 5;
+
     private readonly string _host;
     private readonly string _database;
     private readonly string _user;
@@ -15,12 +19,13 @@ public sealed class NzConnectionPool : IAsyncDisposable
     private readonly TimeSpan _idleTimeout;
     private readonly TimeSpan _maxLifetime;
     private readonly SemaphoreSlim _semaphore;
-    private readonly ConcurrentQueue<NzConnection> _idle = new();
+    private readonly SemaphoreSlim _idleLock = new(1, 1);
+    private readonly ConcurrentQueue<IdleConnection> _idle = new();
     private readonly ConcurrentDictionary<int, NzConnection> _active = new();
     private readonly CancellationTokenSource _disposeCts = new();
     private int _totalConnections;
     private bool _disposed;
-    private Timer? _maintenanceTimer;
+    private readonly Task _maintenanceTask;
 
     public NzConnectionPool(string host, string database, string user, string password,
         int port = 5480, int minPoolSize = 0, int maxPoolSize = 10,
@@ -36,7 +41,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
         _idleTimeout = TimeSpan.FromSeconds(connectionIdleTimeoutSeconds > 0 ? connectionIdleTimeoutSeconds : 30);
         _maxLifetime = connectionLifetimeSeconds > 0 ? TimeSpan.FromSeconds(connectionLifetimeSeconds) : TimeSpan.MaxValue;
         _semaphore = new SemaphoreSlim(_maxPoolSize, _maxPoolSize);
-        _maintenanceTimer = new Timer(_ => CleanupIdle(), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        _maintenanceTask = Task.Run(() => RunMaintenanceLoopAsync(_disposeCts.Token));
     }
 
     public NzConnectionPool(NzConnectionStringBuilder builder)
@@ -58,8 +63,21 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
         try
         {
-            while (_idle.TryDequeue(out var candidate))
+            while (true)
             {
+                IdleConnection idleEntry;
+                await _idleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    if (!_idle.TryDequeue(out idleEntry))
+                        break;
+                }
+                finally
+                {
+                    _idleLock.Release();
+                }
+
+                var candidate = idleEntry.Connection;
                 if (IsConnectionValid(candidate))
                 {
                     var pid = candidate.Pid;
@@ -111,7 +129,15 @@ public sealed class NzConnectionPool : IAsyncDisposable
         }
 
         _active.TryRemove(pid, out _);
-        _idle.Enqueue(connection);
+        await _idleLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _idle.Enqueue(new IdleConnection(connection, DateTime.UtcNow));
+        }
+        finally
+        {
+            _idleLock.Release();
+        }
         _semaphore.Release();
     }
 
@@ -134,7 +160,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
         {
             using var cmd = connection.CreateCommand();
             cmd.CommandText = "SELECT 1";
-            cmd.CommandTimeout = 0;
+            cmd.CommandTimeout = ValidationTimeoutSeconds;
             using var reader = cmd.ExecuteReader();
             return reader.Read();
         }
@@ -151,24 +177,77 @@ public sealed class NzConnectionPool : IAsyncDisposable
         return (DateTime.UtcNow - connection.CreatedAt) > _maxLifetime;
     }
 
-    private void CleanupIdle()
+    private bool IsIdleConnectionExpired(IdleConnection idleConnection, DateTime nowUtc)
+    {
+        if (_idleTimeout == TimeSpan.MaxValue)
+            return false;
+
+        return (nowUtc - idleConnection.ReturnedAtUtc) > _idleTimeout;
+    }
+
+    private async Task RunMaintenanceLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(MaintenanceInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                await CleanupIdleAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private async Task CleanupIdleAsync(CancellationToken cancellationToken)
     {
         if (_disposed)
             return;
 
-        int cleaned = 0;
-        while (_idle.TryDequeue(out var conn))
+        var nowUtc = DateTime.UtcNow;
+        var toRequeue = new List<IdleConnection>();
+        var toDispose = new List<NzConnection>();
+        int processed = 0;
+        const int maxProcessPerCycle = 1000;
+
+        await _idleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            if (conn.State != System.Data.ConnectionState.Open || IsConnectionExpired(conn))
+            while (processed < maxProcessPerCycle && _idle.TryDequeue(out var idleEntry))
             {
-                DisposeConnectionAsync(conn).GetAwaiter().GetResult();
-                Interlocked.Decrement(ref _totalConnections);
-                cleaned++;
+                cancellationToken.ThrowIfCancellationRequested();
+                var conn = idleEntry.Connection;
+                if (conn.State != System.Data.ConnectionState.Open || IsConnectionExpired(conn) || IsIdleConnectionExpired(idleEntry, nowUtc))
+                {
+                    toDispose.Add(conn);
+                }
+                else
+                {
+                    toRequeue.Add(idleEntry);
+                }
+                processed++;
             }
-            else
+
+            foreach (var entry in toRequeue)
             {
-                _idle.Enqueue(conn);
-                break;
+                _idle.Enqueue(entry);
+            }
+        }
+        finally
+        {
+            _idleLock.Release();
+        }
+
+        foreach (var conn in toDispose)
+        {
+            try
+            {
+                await DisposeConnectionAsync(conn).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _totalConnections);
             }
         }
 
@@ -177,8 +256,16 @@ public sealed class NzConnectionPool : IAsyncDisposable
         {
             try
             {
-                var conn = CreateConnectionAsync(CancellationToken.None).GetAwaiter().GetResult();
-                _idle.Enqueue(conn);
+                var conn = await CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
+                await _idleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    _idle.Enqueue(new IdleConnection(conn, DateTime.UtcNow));
+                }
+                finally
+                {
+                    _idleLock.Release();
+                }
             }
             catch
             {
@@ -201,9 +288,23 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
     public async Task ClearAsync()
     {
-        while (_idle.TryDequeue(out var conn))
+        var toDispose = new List<NzConnection>();
+        await _idleLock.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await DisposeConnectionAsync(conn).ConfigureAwait(false);
+            while (_idle.TryDequeue(out var idleEntry))
+            {
+                toDispose.Add(idleEntry.Connection);
+            }
+        }
+        finally
+        {
+            _idleLock.Release();
+        }
+
+        foreach (var connection in toDispose)
+        {
+            await DisposeConnectionAsync(connection).ConfigureAwait(false);
             Interlocked.Decrement(ref _totalConnections);
         }
     }
@@ -214,9 +315,8 @@ public sealed class NzConnectionPool : IAsyncDisposable
             return;
         _disposed = true;
 
-        _maintenanceTimer?.Dispose();
-        _maintenanceTimer = null;
         _disposeCts.Cancel();
+        await _maintenanceTask.ConfigureAwait(false);
 
         await ClearAsync().ConfigureAwait(false);
 
@@ -227,5 +327,6 @@ public sealed class NzConnectionPool : IAsyncDisposable
         _active.Clear();
 
         _semaphore.Dispose();
+        _idleLock.Dispose();
     }
 }

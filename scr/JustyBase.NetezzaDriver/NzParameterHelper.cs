@@ -6,8 +6,17 @@ internal static class NzParameterHelper
 {
     internal static string SubstituteParameters(string sql, NzParameterCollection parameters)
     {
-        if (parameters is null || parameters.Count == 0)
+        if (parameters is null)
             return sql;
+
+        if (parameters.Count == 0)
+        {
+            var firstPlaceholder = FindFirstPlaceholder(sql);
+            if (firstPlaceholder is not null)
+                throw new InvalidOperationException($"Missing value for SQL parameter '{firstPlaceholder}'.");
+
+            return sql;
+        }
 
         bool hasPositional = false;
         bool hasNamed = false;
@@ -18,6 +27,9 @@ internal static class NzParameterHelper
             else
                 hasNamed = true;
         }
+
+        if (hasNamed && hasPositional)
+            throw new InvalidOperationException("Named and positional parameters cannot be mixed in the same command.");
 
         if (hasNamed)
             return SubstituteNamed(sql, parameters);
@@ -31,6 +43,7 @@ internal static class NzParameterHelper
     private static string SubstituteNamed(string sql, NzParameterCollection parameters)
     {
         var sb = new StringBuilder(sql.Length + 256);
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int i = 0;
 
         while (i < sql.Length)
@@ -73,6 +86,41 @@ internal static class NzParameterHelper
                     i++;
                 }
             }
+            else if (sql[i] == '$' && i + 1 < sql.Length && (sql[i + 1] == '$' || char.IsLetter(sql[i + 1])))
+            {
+                sb.Append(sql[i]);
+                i++;
+                int tagStart = i;
+                while (i < sql.Length && (char.IsLetterOrDigit(sql[i]) || sql[i] == '_'))
+                    i++;
+                string tag = sql[tagStart..i];
+                if (i < sql.Length && sql[i] == '$')
+                {
+                    sb.Append(tag);
+                    sb.Append('$');
+                    i++;
+                    string endTag = "$" + tag + "$";
+                    while (i + endTag.Length <= sql.Length)
+                    {
+                        sb.Append(sql[i]);
+                        if (sql.AsSpan(i, endTag.Length).SequenceEqual(endTag))
+                        {
+                            for (int k = 1; k < endTag.Length; k++)
+                            {
+                                i++;
+                                sb.Append(sql[i]);
+                            }
+                            i++;
+                            break;
+                        }
+                        i++;
+                    }
+                }
+                else
+                {
+                    sb.Append(tag);
+                }
+            }
             else if (sql[i] == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
             {
                 sb.Append("--");
@@ -99,9 +147,13 @@ internal static class NzParameterHelper
                     i++;
                 }
             }
+            else if (sql[i] == ':' && i + 1 < sql.Length && sql[i + 1] == ':')
+            {
+                sb.Append("::");
+                i += 2;
+            }
             else if ((sql[i] == ':' || sql[i] == '@') && i + 1 < sql.Length && IsIdentifierStart(sql[i + 1]))
             {
-                int start = i;
                 char prefix = sql[i];
                 i++;
                 int nameStart = i;
@@ -129,11 +181,11 @@ internal static class NzParameterHelper
                 if (param is not null)
                 {
                     sb.Append(param.ToSqlLiteral());
+                    usedNames.Add(param.ResolvedName ?? paramName);
                 }
                 else
                 {
-                    sb.Append(prefix);
-                    sb.Append(paramName);
+                    throw new InvalidOperationException($"Missing value for SQL parameter '{lookup}'.");
                 }
             }
             else if (sql[i] == '?')
@@ -146,6 +198,13 @@ internal static class NzParameterHelper
                 sb.Append(sql[i]);
                 i++;
             }
+        }
+
+        foreach (NzParameter p in parameters)
+        {
+            var name = p.ResolvedName;
+            if (!p.IsPositional && !string.IsNullOrEmpty(name) && !usedNames.Contains(name))
+                throw new InvalidOperationException($"SQL parameter '{p.ParameterName}' was provided but not used.");
         }
 
         return sb.ToString();
@@ -201,6 +260,41 @@ internal static class NzParameterHelper
                     i++;
                 }
             }
+            else if (sql[i] == '$' && i + 1 < sql.Length && (sql[i + 1] == '$' || char.IsLetter(sql[i + 1])))
+            {
+                sb.Append(sql[i]);
+                i++;
+                int tagStart = i;
+                while (i < sql.Length && (char.IsLetterOrDigit(sql[i]) || sql[i] == '_'))
+                    i++;
+                string tag = sql[tagStart..i];
+                if (i < sql.Length && sql[i] == '$')
+                {
+                    sb.Append(tag);
+                    sb.Append('$');
+                    i++;
+                    string endTag = "$" + tag + "$";
+                    while (i + endTag.Length <= sql.Length)
+                    {
+                        sb.Append(sql[i]);
+                        if (sql.AsSpan(i, endTag.Length).SequenceEqual(endTag))
+                        {
+                            for (int k = 1; k < endTag.Length; k++)
+                            {
+                                i++;
+                                sb.Append(sql[i]);
+                            }
+                            i++;
+                            break;
+                        }
+                        i++;
+                    }
+                }
+                else
+                {
+                    sb.Append(tag);
+                }
+            }
             else if (sql[i] == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
             {
                 sb.Append("--");
@@ -233,12 +327,19 @@ internal static class NzParameterHelper
                 paramIndex++;
                 i++;
             }
+            else if (sql[i] == '?' && paramIndex >= paramValues.Count)
+            {
+                throw new InvalidOperationException("Not enough positional parameter values were provided.");
+            }
             else
             {
                 sb.Append(sql[i]);
                 i++;
             }
         }
+
+        if (paramIndex < paramValues.Count)
+            throw new InvalidOperationException("More positional parameter values were provided than placeholders in SQL.");
 
         return sb.ToString();
     }
@@ -251,5 +352,95 @@ internal static class NzParameterHelper
     private static bool IsIdentifierPart(char c)
     {
         return char.IsLetterOrDigit(c) || c == '_' || c == '.';
+    }
+
+    private static string? FindFirstPlaceholder(string sql)
+    {
+        int i = 0;
+        while (i < sql.Length)
+        {
+            if (sql[i] == '\'')
+            {
+                i++;
+                while (i < sql.Length)
+                {
+                    if (sql[i] == '\'' && (i + 1 >= sql.Length || sql[i + 1] != '\''))
+                    {
+                        i++;
+                        break;
+                    }
+                    if (sql[i] == '\'' && i + 1 < sql.Length && sql[i + 1] == '\'')
+                        i++;
+                    i++;
+                }
+            }
+            else if (sql[i] == '"')
+            {
+                i++;
+                while (i < sql.Length && sql[i] != '"')
+                    i++;
+                if (i < sql.Length)
+                    i++;
+            }
+            else if (sql[i] == '$' && i + 1 < sql.Length && (sql[i + 1] == '$' || char.IsLetter(sql[i + 1])))
+            {
+                i++;
+                int tagStart = i;
+                while (i < sql.Length && (char.IsLetterOrDigit(sql[i]) || sql[i] == '_'))
+                    i++;
+                string tag = sql[tagStart..i];
+                if (i < sql.Length && sql[i] == '$')
+                {
+                    i++;
+                    string endTag = "$" + tag + "$";
+                    while (i + endTag.Length <= sql.Length)
+                    {
+                        if (sql.AsSpan(i, endTag.Length).SequenceEqual(endTag))
+                        {
+                            i += endTag.Length;
+                            break;
+                        }
+                        i++;
+                    }
+                }
+            }
+            else if (sql[i] == '-' && i + 1 < sql.Length && sql[i + 1] == '-')
+            {
+                i += 2;
+                while (i < sql.Length && sql[i] != '\n')
+                    i++;
+            }
+            else if (sql[i] == '/' && i + 1 < sql.Length && sql[i + 1] == '*')
+            {
+                i += 2;
+                while (i + 1 < sql.Length && !(sql[i] == '*' && sql[i + 1] == '/'))
+                    i++;
+                if (i + 1 < sql.Length)
+                    i += 2;
+            }
+            else if (sql[i] == ':' && i + 1 < sql.Length && sql[i + 1] == ':')
+            {
+                i += 2;
+            }
+            else if ((sql[i] == ':' || sql[i] == '@') && i + 1 < sql.Length && IsIdentifierStart(sql[i + 1]))
+            {
+                char prefix = sql[i];
+                i++;
+                int nameStart = i;
+                while (i < sql.Length && IsIdentifierPart(sql[i]))
+                    i++;
+                return prefix + sql[nameStart..i];
+            }
+            else if (sql[i] == '?')
+            {
+                return "?";
+            }
+            else
+            {
+                i++;
+            }
+        }
+
+        return null;
     }
 }

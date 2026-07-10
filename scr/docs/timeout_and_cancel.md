@@ -2,7 +2,7 @@
 
 ## Per-command timeout
 
-Each `NzCommand` supports a `CommandTimeout` property (in seconds). If the query does not complete within the timeout, an `OperationCanceledException` is thrown.
+Each `NzCommand` supports a `CommandTimeout` property (in seconds). If the query does not complete within the timeout, the driver cancels the query and throws `NetezzaException` with a timeout message.
 
 ```csharp
 using var cmd = conn.CreateCommand("SELECT * FROM heavy_query");
@@ -13,7 +13,7 @@ try
     while (await reader.ReadAsync())
         Process(reader);
 }
-catch (OperationCanceledException)
+catch (NetezzaException ex) when (ex.Message.Contains("timeout", StringComparison.OrdinalIgnoreCase))
 {
     Console.WriteLine("Query timed out after 10 seconds");
 }
@@ -34,7 +34,7 @@ Console.WriteLine(cmd1.CommandTimeout); // 30
 cmd1.CommandTimeout = 5;
 ```
 
-If `DefaultCommandTimeout` is not set, the default is 0 (no timeout).
+If `DefaultCommandTimeout` is not set explicitly, the default is 60 seconds. A timeout of `0` means "no timeout".
 
 ## CancellationToken
 
@@ -64,14 +64,14 @@ This sends a cancel request to the Netezza server. The connection remains open a
 1. A `CancellationTokenSource` is created with the `CommandTimeout` value
 2. On timeout, the cancellation token is triggered
 3. The driver sends a cancel request to the server
-4. An `OperationCanceledException` is thrown to the caller
+4. `NetezzaException` is thrown to the caller
 5. The connection remains usable (not closed)
 
 ## Best practices
 
 - For interactive applications, use `CancellationToken` from the UI layer
 - For batch processing, set `CommandTimeout` to a reasonable value for your workload
-- A timeout of 0 means "no timeout" (wait indefinitely)
+- A timeout of `0` means "no timeout" (wait indefinitely)
 - Timeouts that are too short can cause false positives on slow queries
 - Timeouts that are too long can leave connections blocked
-- Always handle `OperationCanceledException` when using timeouts
+- Handle timeout failures as `NetezzaException`

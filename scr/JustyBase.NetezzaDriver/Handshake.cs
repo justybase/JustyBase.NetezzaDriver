@@ -236,7 +236,7 @@ internal sealed class Handshake
             var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
             var md5pwd = Convert.ToBase64String(md5encoded);
             var pwd = md5pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("md5 encrypted password is = {Pwd}", new string(pwd));
+            _logger?.LogDebug("MD5 password response generated");
 
             var pwdBytes = Encoding.UTF8.GetBytes(pwd);
             // Int32 - Message length including self.
@@ -260,7 +260,7 @@ internal sealed class Handshake
             var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
             var sha256pwd = Convert.ToBase64String(sha256encoded);
             var pwd = sha256pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("sha256 encrypted password is = {Pwd}", new string(pwd));
+            _logger?.LogDebug("SHA256 password response generated");
 
             var pwdBytes = Encoding.UTF8.GetBytes(pwd);
             // Int32 - Message length including
@@ -319,7 +319,7 @@ internal sealed class Handshake
             var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
             var md5pwd = Convert.ToBase64String(md5encoded);
             var pwd = md5pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("md5 encrypted password is = {Pwd}", new string(pwd));
+            _logger?.LogDebug("MD5 password response generated");
 
             var pwdBytes = Encoding.UTF8.GetBytes(pwd);
             await WriteInt32Async( pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
@@ -337,7 +337,7 @@ internal sealed class Handshake
             var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
             var sha256pwd = Convert.ToBase64String(sha256encoded);
             var pwd = sha256pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("sha256 encrypted password is = {Pwd}", new string(pwd));
+            _logger?.LogDebug("SHA256 password response generated");
 
             var pwdBytes = Encoding.UTF8.GetBytes(pwd);
             await WriteInt32Async( pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
@@ -1271,7 +1271,7 @@ internal sealed class Handshake
             {
                 BackendKeyData = new BackendKeyDataMessage(_stream);
                 _logger?.LogDebug("Backend response PID: {Pid}", BackendKeyData.BackendProcessId);
-                _logger?.LogDebug("Backend response KEY: {Key}", BackendKeyData.BackendSecretKey);
+                _logger?.LogDebug("Backend response KEY received");
             }
 
             if (response == (byte)BackendMessageCode.ReadyForQuery)
@@ -1326,7 +1326,7 @@ internal sealed class Handshake
             {
                 BackendKeyData = await BackendKeyDataMessage.CreateAsync(_stream, cancellationToken).ConfigureAwait(false);
                 _logger?.LogDebug("Backend response PID: {Pid}", BackendKeyData.BackendProcessId);
-                _logger?.LogDebug("Backend response KEY: {Key}", BackendKeyData.BackendSecretKey);
+                _logger?.LogDebug("Backend response KEY received");
             }
 
             if (response == (byte)BackendMessageCode.ReadyForQuery)

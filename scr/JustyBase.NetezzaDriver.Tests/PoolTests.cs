@@ -133,11 +133,11 @@ public class PoolUnitTests
     }
 
     [Fact]
-    public void PooledNzConnection_DisposeReturnsToPool()
+    public async Task PooledNzConnection_DisposeReturnsToPool()
     {
         var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, 10, 30, 0);
         Assert.NotNull(pool);
-        pool.DisposeAsync().GetAwaiter().GetResult();
+        await pool.DisposeAsync();
     }
 
     [Fact]

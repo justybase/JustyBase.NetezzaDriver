@@ -812,6 +812,17 @@ public sealed class NzConnection : DbConnection
         set => throw new NotSupportedException("Setting ConnectionString is not supported. Create a new NzConnection instance.");
     }
 
+    public string SafeConnectionString => new NzConnectionStringBuilder()
+    {
+        Host = _host,
+        Database = _database,
+        UserName = _user,
+        Password = _password,
+        Port = _port,
+        Timeout = (int)ConnectionTimeoutDuration.TotalSeconds,
+        LoggerFactory = _loggerFactory
+    }.SafeConnectionString;
+
     public override string Database => _database;
 
     public override string DataSource => _host;
@@ -828,6 +839,18 @@ public sealed class NzConnection : DbConnection
     }
 
     private DbosTupleDesc _tupdesc = null!;
+
+    private static T ConvertField<T>(Func<T> converter, int fieldOrdinal, string dataTypeName)
+    {
+        try
+        {
+            return converter();
+        }
+        catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentOutOfRangeException or ArgumentException or InvalidCastException)
+        {
+            throw new InvalidCastException($"Failed to convert column {fieldOrdinal + 1} as {dataTypeName}.", ex);
+        }
+    }
 
     private void HandleTimeout()
     {
@@ -2224,9 +2247,17 @@ public sealed class NzConnection : DbConnection
                 int prec = CTableIFieldPrecision(curField);
                 int scale = CTableIFieldScale(curField);
                 int count = CTableIFieldNumericDigit32Count(curField);
-                decimal? value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
+                decimal value;
+                try
+                {
+                    value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
+                }
+                catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentOutOfRangeException or InvalidCastException)
+                {
+                    throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
+                }
                 rowValue.typeCode = TypeCodeEx.Decimal;
-                rowValue.decimalValue = value ?? 9999.99m;
+                rowValue.decimalValue = value;
                 _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, value);
             }
             else if (fldtype == NzTypeBool)
@@ -2475,7 +2506,7 @@ public sealed class NzConnection : DbConnection
                         break;
                     case 1082: // date
                         rowValue.typeCode = TypeCodeEx.DateTime;//without time
-                        rowValue.dateTimeValue = DateTypes.DateInTyped(data, dataIdx, vlen - 4);
+                        rowValue.dateTimeValue = ConvertField(() => DateTypes.DateInTyped(data, dataIdx, vlen - 4), columnNumber, "DATE");
                         break;
                     case 1083: // time
                         rowValue.typeCode = TypeCodeEx.TimeSpan;
@@ -2483,11 +2514,11 @@ public sealed class NzConnection : DbConnection
                         break;
                     case 1114: // timestamp w/ tz
                         rowValue.typeCode = TypeCodeEx.DateTime;
-                        rowValue.dateTimeValue = DateTypes.TimestampRecvFloatTyped(data, dataIdx, vlen - 4);
+                        rowValue.dateTimeValue = ConvertField(() => DateTypes.TimestampRecvFloatTyped(data, dataIdx, vlen - 4), columnNumber, "TIMESTAMP");
                         break;
                     case 1184:
                         rowValue.typeCode = TypeCodeEx.DateTime;
-                        rowValue.dateTimeValue = DateTypes.TimestamptzRecvFloatTyped(data, dataIdx, vlen - 4);
+                        rowValue.dateTimeValue = ConvertField(() => DateTypes.TimestamptzRecvFloatTyped(data, dataIdx, vlen - 4), columnNumber, "TIMESTAMPTZ");
                         break;
                     case 1186:
                         rowValue.typeCode = TypeCodeEx.String;

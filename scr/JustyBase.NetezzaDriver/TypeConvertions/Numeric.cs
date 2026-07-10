@@ -119,8 +119,8 @@ internal sealed class Numeric
     /// <param name="prec">The precision of the numeric data.</param>
     /// <param name="scale">The scale of the numeric data.</param>
     /// <param name="digitCount">The number of digits in the numeric data.</param>
-    /// <returns>The converted decimal value, or null if the conversion failed.</returns>
-    public static decimal? GetCsNumeric(ReadOnlySpan<byte> data, int prec, int scale, int digitCount)
+    /// <returns>The converted decimal value.</returns>
+    public static decimal GetCsNumeric(ReadOnlySpan<byte> data, int prec, int scale, int digitCount)
     {
         int numParts = prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
 
@@ -151,18 +151,15 @@ internal sealed class Numeric
         bool isMinus = IsNumericDataNegative(varPdata);
         //if negative -> negate, Negate128 mutates varPdata
         if (isMinus && Negate128(varPdata))
-            return null;
+            throw new FormatException("Numeric value could not be converted from Netezza binary format.");
 
         if (IsValidDecimal((int)varPdata[0]))
         {
             var dc1 = new decimal((int)varPdata[3], (int)varPdata[2], (int)varPdata[1], isMinus, (byte)scale);
             return dc1;
         }
-        else
-        {
-            var dc1 = GetNumericFromChars(scale, varPdata, isMinus);
-            return dc1;
-        }
+
+        return GetNumericFromChars(scale, varPdata, isMinus);
     }
 
     /// <summary>
@@ -171,8 +168,8 @@ internal sealed class Numeric
     /// <param name="scale">The scale of the numeric data.</param>
     /// <param name="dataBufferV2">The numeric data buffer.</param>
     /// <param name="isMinus">Indicates if the numeric data is negative.</param>
-    /// <returns>The converted decimal value, or null if the conversion failed.</returns>
-    private static decimal? GetNumericFromChars(int scale, Span<long> dataBufferV2, bool isMinus)
+    /// <returns>The converted decimal value.</returns>
+    private static decimal GetNumericFromChars(int scale, Span<long> dataBufferV2, bool isMinus)
     {
         Span<int> intDigits = stackalloc int[NUMERIC_MAX_PRECISION];
         Span<byte> charDigits = stackalloc byte[NUMERIC_MAX_PRECISION];
@@ -212,8 +209,6 @@ internal sealed class Numeric
             charDigits.Slice(0, length).CopyTo(charDigitsWithSignDot.Slice(nm));
             nm += length;
         }
-        var dec_ = decimal.Parse(charDigitsWithSignDot.Slice(0, nm), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, provider: CultureInfo.InvariantCulture);
-
-        return dec_;
+        return decimal.Parse(charDigitsWithSignDot.Slice(0, nm), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, provider: CultureInfo.InvariantCulture);
     }
 }

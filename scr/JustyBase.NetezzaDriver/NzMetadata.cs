@@ -36,9 +36,9 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, tablename, owner, objtype, objid, reltuples FROM _v_table WHERE tablename IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         if (pattern is not null)
-            sql += $" AND tablename LIKE '{EscapeLiteral(pattern)}'";
+            sql += $" AND tablename LIKE {SqlStringLiteral(pattern)}";
         sql += " AND schema NOT IN ('DEFINITION_SCHEMA', 'INZA', 'NZ_QUERY_HISTORY')";
         sql += " AND objtype <> 'SYSTEM_TABLE'";
         sql += " ORDER BY schema, tablename";
@@ -55,9 +55,9 @@ public sealed class NzMetadata
 
     public async Task<IReadOnlyList<NzColumnInfo>> GetColumnsAsync(string table, string? schema = null)
     {
-        var sql = $"SELECT attname, attnum, format_type, CASE WHEN attnotnull THEN 'N' ELSE 'Y' END, objid, description FROM _v_relation_column WHERE name = '{EscapeLiteral(table)}'";
+        var sql = $"SELECT attname, attnum, format_type, CASE WHEN attnotnull THEN 'N' ELSE 'Y' END, objid, description FROM _v_relation_column WHERE name = {SqlStringLiteral(table)}";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY attnum";
 
         return await ExecuteQueryAsync(sql, reader => new NzColumnInfo(
@@ -75,7 +75,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, viewname, owner, objid, definition FROM _v_view WHERE viewname IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY schema, viewname";
 
         return await ExecuteQueryAsync(sql, reader => new NzViewInfo(
@@ -91,7 +91,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, procedure, owner, objid, proceduresignature, returns, builtin, proceduresource, executedasowner, arguments, description FROM _v_procedure WHERE procedure IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY schema, procedure";
 
         return await ExecuteQueryAsync(sql, reader => new NzProcedureInfo(
@@ -111,9 +111,9 @@ public sealed class NzMetadata
 
     public async Task<IReadOnlyList<string>> GetDistributionKeyAsync(string table, string? schema = null)
     {
-        var sql = $"SELECT attname FROM _v_table_dist_map WHERE tablename = '{EscapeLiteral(table)}'";
+        var sql = $"SELECT attname FROM _v_table_dist_map WHERE tablename = {SqlStringLiteral(table)}";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY distattnum";
 
         var result = new List<string>();
@@ -128,7 +128,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, tablename, used_bytes, allocated_bytes, (used_bytes / 1048576)::BIGINT AS size_mb, skew FROM _v_table_storage_stat WHERE tablename IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY used_bytes DESC";
 
         return await ExecuteQueryAsync(sql, reader => new NzTableSizeInfo(
@@ -187,7 +187,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, function, owner, objid, functionsignature, returns, env FROM _v_function WHERE function IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY schema, function";
 
         return await ExecuteQueryAsync(sql, reader =>
@@ -210,7 +210,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, synonym_name, refobjname, refdatabase, refschema, description FROM _v_synonym WHERE synonym_name IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY schema, synonym_name";
 
         return await ExecuteQueryAsync(sql, reader => new NzSynonymInfo(
@@ -227,7 +227,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, relation, constraintname, contype, attname, pkdatabase, pkschema, pkrelation, pkattname, updt_type, del_type FROM _v_relation_keydata WHERE relation IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY schema, relation, conseq";
 
         return await ExecuteQueryAsync(sql, reader => new NzConstraintInfo(
@@ -249,7 +249,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, tablename, attname, distattnum FROM _v_table_dist_map WHERE tablename IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY schema, tablename, distseqno";
 
         return await ExecuteQueryAsync(sql, reader => new NzDistKeyInfo(
@@ -264,7 +264,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, tablename, attname, attnum FROM _v_table_organize_column WHERE tablename IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " ORDER BY schema, tablename, orgseqno";
 
         return await ExecuteQueryAsync(sql, reader => new NzOrganizeKeyInfo(
@@ -280,7 +280,7 @@ public sealed class NzMetadata
     {
         var sql = "SELECT schema, objname, objtype, owner, objid, description, createdate FROM _v_object_data WHERE objname IS NOT NULL";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " AND objtype NOT IN ('AGGREGATE','CONSTRAINT','DATABASE','DATATYPE','GROUP','MANAGEMENT INDEX','MANAGEMENT SEQ','MANAGEMENT TABLE','MANAGEMENT VIEW','SCHEDULER RULE','SCHEMA','SYSTEM INDEX','SYSTEM SEQ','SYSTEM TABLE','SYSTEM VIEW','USER')";
         sql += " ORDER BY schema, objtype, objname";
 
@@ -298,9 +298,9 @@ public sealed class NzMetadata
     /// <summary>Enhanced cross-object search that includes all object types, descriptions, and creation dates.</summary>
     public async Task<IReadOnlyList<NzObjectDetailInfo>> SearchObjectsDetailedAsync(string pattern, string? schema = null)
     {
-        var sql = $"SELECT schema, objname, objtype, owner, objid, description, createdate FROM _v_object_data WHERE UPPER(objname) LIKE UPPER('%{EscapeLiteral(pattern)}%')";
+        var sql = $"SELECT schema, objname, objtype, owner, objid, description, createdate FROM _v_object_data WHERE UPPER(objname) LIKE UPPER({SqlLikeContainsLiteral(pattern)})";
         if (schema is not null)
-            sql += $" AND schema = '{EscapeLiteral(schema)}'";
+            sql += $" AND schema = {SqlStringLiteral(schema)}";
         sql += " AND objtype NOT IN ('AGGREGATE','CONSTRAINT','DATABASE','DATATYPE','GROUP','MANAGEMENT INDEX','MANAGEMENT SEQ','MANAGEMENT TABLE','MANAGEMENT VIEW','SCHEDULER RULE','SCHEMA','SYSTEM INDEX','SYSTEM SEQ','SYSTEM TABLE','SYSTEM VIEW','USER')";
         sql += " ORDER BY schema, objtype, objname";
 
@@ -325,8 +325,11 @@ public sealed class NzMetadata
         return result.AsReadOnly();
     }
 
-    private static string EscapeLiteral(string s)
+    private static string SqlStringLiteral(string value) => NzParameter.ValueToSqlLiteral(value);
+
+    private static string SqlLikeContainsLiteral(string value)
     {
-        return s.Replace("'", "''");
+        var escaped = value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+        return NzParameter.ValueToSqlLiteral($"%{escaped}%") + " ESCAPE '\\'";
     }
 }

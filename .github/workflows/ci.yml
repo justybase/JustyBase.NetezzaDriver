@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  build-test-pack:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore .\scr\JustyBase.NetezzaDriver.slnx
+
+      - name: Build
+        run: dotnet build .\scr\JustyBase.NetezzaDriver.slnx -c Release --no-restore
+
+      - name: Unit tests
+        run: dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj -c Release --no-build --filter "Category=Unit"
+
+      - name: Pack
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet pack .\scr\JustyBase.NetezzaDriver\JustyBase.NetezzaDriver.csproj -c Release --no-build /p:GeneratePackageOnBuild=false

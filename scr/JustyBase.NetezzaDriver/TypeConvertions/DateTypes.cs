@@ -116,19 +116,11 @@ internal static class DateTypes
     /// <returns></returns>
     internal static DateTime DateInTyped(byte[] data, int offset, int length)
     {
-        //string dateStr = _clientEncoding.GetString(data, offset, length);
         ReadOnlySpan<byte> spB = new ReadOnlySpan<byte>(data, offset, length);
-        try
-        {
-            return new DateTime(
-                int.Parse(spB[0..4]),  // year
-                int.Parse(spB[5..7]),  // month
-                int.Parse(spB[8..10])); // day
-        }
-        catch (Exception)
-        {
-            return DateTime.MinValue;
-        }
+        return new DateTime(
+            int.Parse(spB[0..4]),  // year
+            int.Parse(spB[5..7]),  // month
+            int.Parse(spB[8..10])); // day
     }
 
     /// <summary>
@@ -148,11 +140,8 @@ internal static class DateTypes
         {
             return res;
         }
-        else
-        {
-            //return new string(chars);
-            return DateTime.MinValue;
-        }
+
+        throw new FormatException($"Invalid timestamp with time zone value '{chars.ToString()}'.");
     }
 
     internal static TimeSpan TimeInTyped(byte[] data, int offset, int length)

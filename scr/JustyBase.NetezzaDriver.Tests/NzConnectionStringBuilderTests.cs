@@ -53,6 +53,24 @@ public class NzConnectionStringBuilderTests
     }
 
     [Fact]
+    public void ToSafeString_RedactsPassword()
+    {
+        var builder = new NzConnectionStringBuilder
+        {
+            Host = "localhost",
+            Database = "testdb",
+            UserName = "user",
+            Password = "password"
+        };
+
+        var safeConnectionString = builder.ToSafeString();
+
+        Assert.Contains("Password=********;", safeConnectionString);
+        Assert.DoesNotContain("Password=password;", safeConnectionString);
+        Assert.Equal(safeConnectionString, builder.SafeConnectionString);
+    }
+
+    [Fact]
     public void Defaults_AreCorrect()
     {
         // Arrange
@@ -64,5 +82,15 @@ public class NzConnectionStringBuilderTests
         // Assert
         Assert.Contains("Port=5480;", connectionString);
         Assert.Contains("Timeout=0;", connectionString);
+    }
+
+    [Fact]
+    public void NzConnection_SafeConnectionString_RedactsPassword()
+    {
+        using var connection = new NzConnection("user", "password", "host", "db");
+
+        Assert.Contains("Password=********;", connection.SafeConnectionString);
+        Assert.DoesNotContain("Password=password;", connection.SafeConnectionString);
+        Assert.Contains("Password=password;", connection.ConnectionString);
     }
 }
