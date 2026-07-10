@@ -28,8 +28,8 @@ jobs:
         run: dotnet build ./src/JustyBase.NetezzaDriver.slnx -c Release --no-restore
 
       - name: Unit tests
-        run: dotnet test ./src/JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj -c Release --no-build --filter "Category=Unit"
+        run: dotnet test ./src/JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj -c Release --no-build --filter "Category=Unit"
 
       - name: Pack
         if: matrix.os == 'ubuntu-latest'
-        run: dotnet pack ./src/JustyBase.NetezzaDriver\JustyBase.NetezzaDriver.csproj -c Release --no-build /p:GeneratePackageOnBuild=false
+        run: dotnet pack ./src/JustyBase.NetezzaDriver/JustyBase.NetezzaDriver.csproj -c Release --no-build /p:GeneratePackageOnBuild=false
