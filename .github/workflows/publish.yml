@@ -18,13 +18,13 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore .\scr\JustyBase.NetezzaDriver.slnx
+        run: dotnet restore .\src\JustyBase.NetezzaDriver.slnx
 
       - name: Build
-        run: dotnet build .\scr\JustyBase.NetezzaDriver.slnx -c Release --no-restore
+        run: dotnet build .\src\JustyBase.NetezzaDriver.slnx -c Release --no-restore
 
       - name: Pack
-        run: dotnet pack .\scr\JustyBase.NetezzaDriver\JustyBase.NetezzaDriver.csproj -c Release --no-build /p:GeneratePackageOnBuild=false
+        run: dotnet pack .\src\JustyBase.NetezzaDriver\JustyBase.NetezzaDriver.csproj -c Release --no-build /p:GeneratePackageOnBuild=false
 
       - name: NuGet login
         uses: nuget/login@v1

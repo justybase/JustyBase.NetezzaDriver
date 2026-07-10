@@ -116,7 +116,7 @@ var count = await cmd2.ExecuteScalarAsync();
 | `byte[]` | `x'hex'` | `x'deadbeef'` |
 | `Guid` | `'guid'` | `'...'` |
 
-See [docs/parameters.md](scr/docs/parameters.md) for details.
+See [docs/parameters.md](src/docs/parameters.md) for details.
 
 ## Connection pooling
 
@@ -143,7 +143,7 @@ var result = await cmd.ExecuteScalarAsync();
 
 The pool validates connections with `SELECT 1`, automatically rolls back open transactions on return, and runs a background maintenance timer every 30 seconds.
 
-See [docs/pooling.md](scr/docs/pooling.md) for details.
+See [docs/pooling.md](src/docs/pooling.md) for details.
 
 ## Column metadata
 
@@ -178,7 +178,7 @@ var sessions  = await meta.GetSessionsAsync();
 var search    = await meta.SearchObjectsAsync("DIM%");
 ```
 
-See [docs/metadata_api.md](scr/docs/metadata_api.md) for full API reference.
+See [docs/metadata_api.md](src/docs/metadata_api.md) for full API reference.
 
 ## Timeout and cancel
 
@@ -199,7 +199,7 @@ await using var reader = await cmd.ExecuteReaderAsync(cts.Token);
 connection.CancelQuery();
 ```
 
-See [docs/timeout_and_cancel.md](scr/docs/timeout_and_cancel.md) for details.
+See [docs/timeout_and_cancel.md](src/docs/timeout_and_cancel.md) for details.
 
 ## ADO.NET support
 
@@ -230,10 +230,10 @@ conn.Open();
 
 ## Benchmark (sync vs async DataReader)
 
-The benchmark project at `scr/JustyBase.NetezzaDriver.Benchmarks` compares sync (`ExecuteReader`) vs async (`ExecuteReaderAsync`) for large data reads.
+The benchmark project at `src/JustyBase.NetezzaDriver.Benchmarks` compares sync (`ExecuteReader`) vs async (`ExecuteReaderAsync`) for large data reads.
 
 ```bash
-dotnet run -c Release -f net10.0 --project .\scr\JustyBase.NetezzaDriver.Benchmarks -- --filter *AsyncReaderBench*
+dotnet run -c Release -f net10.0 --project .\src\JustyBase.NetezzaDriver.Benchmarks -- --filter *AsyncReaderBench*
 ```
 
 Sample results (net10.0, BenchmarkDotNet, Windows 11):
@@ -251,10 +251,10 @@ Async overhead is negligible (~1–3% time, 0–5% allocations).
 
 ```bash
 # Unit tests only
-dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Unit"
+dotnet test .\src\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Unit"
 
 # Integration tests (requires live Netezza)
-dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Integration"
+dotnet test .\src\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Integration"
 ```
 
 Integration tests read connection settings from environment variables:
@@ -273,8 +273,8 @@ For questions, bug reports, or feature requests, [open an issue on GitHub](https
 
 ## Documentation
 
-- [Parameters](scr/docs/parameters.md) — Named and positional parameter reference
-- [Pooling](scr/docs/pooling.md) — Connection pool configuration and lifecycle
-- [Metadata API](scr/docs/metadata_api.md) — Catalog introspection methods
-- [Timeout & Cancel](scr/docs/timeout_and_cancel.md) — Command timeout, CancellationToken, CancelQuery
-- [Examples project](scr/examples/JustyBase.NetezzaDriver.Examples/) — Runnable C# examples
+- [Parameters](src/docs/parameters.md) — Named and positional parameter reference
+- [Pooling](src/docs/pooling.md) — Connection pool configuration and lifecycle
+- [Metadata API](src/docs/metadata_api.md) — Catalog introspection methods
+- [Timeout & Cancel](src/docs/timeout_and_cancel.md) — Command timeout, CancellationToken, CancelQuery
+- [Examples project](src/examples/JustyBase.NetezzaDriver.Examples/) — Runnable C# examples

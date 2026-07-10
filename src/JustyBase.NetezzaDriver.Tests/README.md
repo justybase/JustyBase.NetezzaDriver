@@ -17,10 +17,10 @@ If variables are not provided, local defaults are used.
 ## Running tests
 Run unit tests only:
 ```bash
-dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Unit"
+dotnet test .\src\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Unit"
 ```
 
 Run integration tests only:
 ```bash
-dotnet test .\scr\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Integration"
+dotnet test .\src\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj --filter "Category=Integration"
 ```
