@@ -32,4 +32,4 @@ jobs:
 
       - name: Pack
         if: matrix.os == 'ubuntu-latest'
-        run: dotnet pack ./src/JustyBase.NetezzaDriver/JustyBase.NetezzaDriver.csproj -c Release --no-build /p:GeneratePackageOnBuild=false
+        run: dotnet pack ./src/JustyBase.NetezzaDriver/JustyBase.NetezzaDriver.csproj -c Release --no-build --output ./nupkg /p:GeneratePackageOnBuild=false
