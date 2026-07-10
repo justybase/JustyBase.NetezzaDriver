@@ -9,11 +9,11 @@ public sealed class NzDbColumn : DbColumn
     public string? DeclaredTypeName { get; internal set; }
 
     internal NzDbColumn(
-        string? columnName,
+        string columnName,
         int? columnOrdinal,
         int providerType,
         int typeModifier,
-        Type? dataType,
+        Type dataType,
         string? dataTypeName,
         int? columnSize,
         int? numericPrecision,
@@ -28,9 +28,7 @@ public sealed class NzDbColumn : DbColumn
         ProviderType = providerType;
         TypeModifier = typeModifier;
         DataType = dataType;
-#pragma warning disable CS8601 // Possible null reference assignment
-        DataTypeName = dataTypeName ?? dataType?.Name;
-#pragma warning restore CS8601
+        DataTypeName = dataTypeName ?? dataType.Name;
         ColumnSize = columnSize;
         NumericPrecision = numericPrecision;
         NumericScale = numericScale;

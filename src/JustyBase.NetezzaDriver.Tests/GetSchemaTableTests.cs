@@ -32,14 +32,14 @@ public class GetSchemaTableTests
         Assert.Equal(5, schemaTable!.Rows.Count);
 
         // Verify column types
-        Assert.Equal(typeof(string), schemaTable.Columns["ColumnName"].DataType);
-        Assert.Equal(typeof(int), schemaTable.Columns["ColumnOrdinal"].DataType);
-        Assert.Equal(typeof(Int16), schemaTable.Columns["ColumnSize"].DataType);
-        Assert.Equal(typeof(int), schemaTable.Columns["NumericPrecision"].DataType);
-        Assert.Equal(typeof(int), schemaTable.Columns["NumericScale"].DataType);
-        Assert.Equal(typeof(Type), schemaTable.Columns["DataType"].DataType);
-        Assert.Equal(typeof(int), schemaTable.Columns["ProviderType"].DataType);
-        Assert.Equal(typeof(bool), schemaTable.Columns["AllowDBNull"].DataType);
+        Assert.Equal(typeof(string), schemaTable.Columns["ColumnName"]!.DataType);
+        Assert.Equal(typeof(int), schemaTable.Columns["ColumnOrdinal"]!.DataType);
+        Assert.Equal(typeof(Int16), schemaTable.Columns["ColumnSize"]!.DataType);
+        Assert.Equal(typeof(int), schemaTable.Columns["NumericPrecision"]!.DataType);
+        Assert.Equal(typeof(int), schemaTable.Columns["NumericScale"]!.DataType);
+        Assert.Equal(typeof(Type), schemaTable.Columns["DataType"]!.DataType);
+        Assert.Equal(typeof(int), schemaTable.Columns["ProviderType"]!.DataType);
+        Assert.Equal(typeof(bool), schemaTable.Columns["AllowDBNull"]!.DataType);
 
         // Verify numeric column metadata
         var numericRow = schemaTable.Rows[3];
@@ -65,7 +65,8 @@ public class GetSchemaTableTests
         using var reader = cmd.ExecuteReader();
         var schemaTable = reader.GetSchemaTable();
 
-        var row = schemaTable.Rows[0];
+        Assert.NotNull(schemaTable);
+        var row = schemaTable!.Rows[0];
         Assert.Equal<bool>(false, (bool)row["AllowDBNull"]);
     }
 
@@ -84,7 +85,8 @@ public class GetSchemaTableTests
         using var reader = cmd.ExecuteReader();
         var schemaTable = reader.GetSchemaTable();
 
-        var row = schemaTable.Rows[0];
+        Assert.NotNull(schemaTable);
+        var row = schemaTable!.Rows[0];
         Assert.Equal<bool>(false, (bool)row["AllowDBNull"]);
 
         row = schemaTable.Rows[1];
