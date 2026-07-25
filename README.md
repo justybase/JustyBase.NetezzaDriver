@@ -116,7 +116,7 @@ var count = await cmd2.ExecuteScalarAsync();
 | `byte[]` | `x'hex'` | `x'deadbeef'` |
 | `Guid` | `'guid'` | `'...'` |
 
-See [docs/parameters.md](src/docs/parameters.md) for details.
+See [docs/parameters.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/parameters.md) for details.
 
 ## Connection pooling
 
@@ -143,7 +143,7 @@ var result = await cmd.ExecuteScalarAsync();
 
 The pool validates connections with `SELECT 1`, automatically rolls back open transactions on return, and runs a background maintenance timer every 30 seconds.
 
-See [docs/pooling.md](src/docs/pooling.md) for details.
+See [docs/pooling.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/pooling.md) for details.
 
 ## Column metadata
 
@@ -178,7 +178,7 @@ var sessions  = await meta.GetSessionsAsync();
 var search    = await meta.SearchObjectsAsync("DIM%");
 ```
 
-See [docs/metadata_api.md](src/docs/metadata_api.md) for full API reference.
+See [docs/metadata_api.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/metadata_api.md) for full API reference.
 
 ## Timeout and cancel
 
@@ -199,7 +199,7 @@ await using var reader = await cmd.ExecuteReaderAsync(cts.Token);
 connection.CancelQuery();
 ```
 
-See [docs/timeout_and_cancel.md](src/docs/timeout_and_cancel.md) for details.
+See [docs/timeout_and_cancel.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/timeout_and_cancel.md) for details.
 
 ## ADO.NET support
 
@@ -265,16 +265,16 @@ Integration tests read connection settings from environment variables:
 Copyright 2025–2026 Krzysztof Duśko  
 Copyright 2019–2020 IBM, Inc.
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Licensed under the [Apache License, Version 2.0](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/LICENSE).
 
 ## Contact
 
-For questions, bug reports, or feature requests, [open an issue on GitHub](https://github.com/KrzysztofDusko/JustyBase.NetezzaDriver/issues).
+For questions, bug reports, or feature requests, [open an issue on GitHub](https://github.com/justybase/JustyBase.NetezzaDriver/issues).
 
 ## Documentation
 
-- [Parameters](src/docs/parameters.md) — Named and positional parameter reference
-- [Pooling](src/docs/pooling.md) — Connection pool configuration and lifecycle
-- [Metadata API](src/docs/metadata_api.md) — Catalog introspection methods
-- [Timeout & Cancel](src/docs/timeout_and_cancel.md) — Command timeout, CancellationToken, CancelQuery
-- [Examples project](src/examples/JustyBase.NetezzaDriver.Examples/) — Runnable C# examples
+- [Parameters](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/parameters.md) — Named and positional parameter reference
+- [Pooling](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/pooling.md) — Connection pool configuration and lifecycle
+- [Metadata API](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/metadata_api.md) — Catalog introspection methods
+- [Timeout & Cancel](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/timeout_and_cancel.md) — Command timeout, CancellationToken, CancelQuery
+- [Examples project](https://github.com/justybase/JustyBase.NetezzaDriver/tree/master/src/examples/JustyBase.NetezzaDriver.Examples) — Runnable C# examples
