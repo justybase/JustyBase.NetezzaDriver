@@ -4,6 +4,7 @@ using JustyBase.NetezzaDriver.TypeConvertions;
 using JustyBase.NetezzaDriver.Utility;
 using Microsoft.Extensions.Logging;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
@@ -633,6 +634,336 @@ public sealed class NzConnection : DbConnection
         }
     }
 
+    private const int ProtocolSyncTimeoutMs = 2000;
+
+    private byte? _protocolSyncPushback;
+
+    private static NetezzaException ProtocolSyncError(string? context, string detail)
+    {
+        var preview = string.IsNullOrEmpty(context)
+            ? ""
+            : context.Replace('\r', ' ').Replace('\n', ' ');
+        if (preview.Length > 80)
+        {
+            preview = preview[..80];
+        }
+        return new NetezzaException(
+            $"Connection protocol out of sync before executing \"{preview}\": {detail}. Reconnect required.");
+    }
+
+    /// <summary>
+    /// Test helper: send a simple query packet without consuming the backend response
+    /// (simulates abandoned SELECT CURRENT_SID after cancel/timeout).
+    /// Writes via the socket to avoid BufferedStream's "can't write while read buffer
+    /// is non-empty" restriction when RFQ padding is still buffered.
+    /// </summary>
+    internal void InjectUnreadQuery(string sql)
+    {
+        ArgumentNullException.ThrowIfNull(sql);
+        ArgumentNullException.ThrowIfNull(_socket);
+
+        var queryBytes = Encoding.UTF8.GetBytes(sql);
+        var packet = new byte[1 + 4 + queryBytes.Length + 1];
+        packet[0] = (byte)'P';
+        if (_commandNumber != -1)
+        {
+            _commandNumber += 1;
+            if (_commandNumber > 100000)
+            {
+                _commandNumber = 1;
+            }
+            Core.IPack(_commandNumber, packet.AsSpan(1));
+        }
+        else
+        {
+            packet[1] = 0xFF;
+            packet[2] = 0xFF;
+            packet[3] = 0xFF;
+            packet[4] = 0xFF;
+        }
+
+        queryBytes.CopyTo(packet.AsSpan(5));
+        packet[5 + queryBytes.Length] = 0;
+        _socket.Send(packet);
+    }
+
+    private bool TryReadByteNow(out byte value)
+    {
+        value = 0;
+        if (_stream is null || _socket is null)
+        {
+            return false;
+        }
+
+        // Non-blocking probe: BufferedStream/SslStream return immediately when they
+        // already have buffered bytes; otherwise NetworkStream hits a non-blocking
+        // socket and fails at once (no ~1ms ReceiveTimeout on the healthy empty path).
+        bool wasBlocking = _socket.Blocking;
+        try
+        {
+            _socket.Blocking = false;
+            int read = _stream.ReadByte();
+            if (read < 0)
+            {
+                return false;
+            }
+            value = (byte)read;
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+        finally
+        {
+            _socket.Blocking = wasBlocking;
+        }
+    }
+
+    private void ReadExactWithDeadline(Span<byte> buffer, long deadlineTickCount64, string? context, string detail)
+    {
+        int offset = 0;
+        while (offset < buffer.Length)
+        {
+            if (Environment.TickCount64 > deadlineTickCount64)
+            {
+                throw ProtocolSyncError(context, detail);
+            }
+
+            var oldTimeout = _socket.ReceiveTimeout;
+            try
+            {
+                var remainingMs = (int)Math.Clamp(deadlineTickCount64 - Environment.TickCount64, 1, ProtocolSyncTimeoutMs);
+                _socket.ReceiveTimeout = remainingMs;
+                int read = _stream.Read(buffer.Slice(offset));
+                if (read <= 0)
+                {
+                    throw ProtocolSyncError(context, detail);
+                }
+                offset += read;
+            }
+            catch (IOException ex)
+            {
+                throw ProtocolSyncError(context, $"{detail} ({ex.Message})");
+            }
+            catch (SocketException ex)
+            {
+                throw ProtocolSyncError(context, $"{detail} ({ex.Message})");
+            }
+            finally
+            {
+                _socket.ReceiveTimeout = oldTimeout;
+            }
+        }
+    }
+
+    private void SkipBytesExact(int count, long deadlineTickCount64, string? context, string detail)
+    {
+        while (count > 0)
+        {
+            int chunk = Math.Min(count, _tmp_buffer.Length);
+            ReadExactWithDeadline(_tmp_buffer.AsSpan(0, chunk), deadlineTickCount64, context, detail);
+            count -= chunk;
+        }
+    }
+
+    /// <summary>
+    /// Non-blocking: discard leading 0x00 padding already buffered. If a non-null
+    /// byte is found, stash it in <see cref="_protocolSyncPushback"/>.
+    /// Returns true when orphaned (non-null) data is present.
+    /// </summary>
+    private bool TryDetectOrphanedData()
+    {
+        _protocolSyncPushback = null;
+        while (TryReadByteNow(out byte b))
+        {
+            if (b != 0)
+            {
+                _protocolSyncPushback = b;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private bool TryReadProtocolByte(long deadlineTickCount64, out byte value)
+    {
+        if (_protocolSyncPushback is byte pushed)
+        {
+            _protocolSyncPushback = null;
+            value = pushed;
+            return true;
+        }
+
+        if (Environment.TickCount64 > deadlineTickCount64)
+        {
+            value = 0;
+            return false;
+        }
+
+        var oldTimeout = _socket.ReceiveTimeout;
+        try
+        {
+            var remainingMs = (int)Math.Clamp(deadlineTickCount64 - Environment.TickCount64, 1, ProtocolSyncTimeoutMs);
+            _socket.ReceiveTimeout = remainingMs;
+            int read = _stream.ReadByte();
+            if (read < 0)
+            {
+                value = 0;
+                return false;
+            }
+            value = (byte)read;
+            return true;
+        }
+        catch (IOException)
+        {
+            value = 0;
+            return false;
+        }
+        catch (SocketException)
+        {
+            value = 0;
+            return false;
+        }
+        finally
+        {
+            _socket.ReceiveTimeout = oldTimeout;
+        }
+    }
+
+    /// <summary>
+    /// If a previous command left an unread backend response on the wire
+    /// (e.g. abandoned SELECT CURRENT_SID), consume it up to ReadyForQuery before
+    /// the next query so leftover RowDescription/DataRow are not mis-attributed.
+    /// Called after the normal 4-byte null padding skip in PreExecution.
+    /// </summary>
+    private void EnsureProtocolSynced(string? context = null)
+    {
+        if (_stream is null || _socket is null)
+        {
+            return;
+        }
+
+        // Fast path: nothing buffered beyond the padding already skipped.
+        if (!TryDetectOrphanedData())
+        {
+            return;
+        }
+
+        _logger?.LogDebug("Orphaned backend data before command, draining. Context: {Context}", context);
+
+        var deadline = Environment.TickCount64 + ProtocolSyncTimeoutMs;
+        Span<byte> headerScratch = stackalloc byte[8];
+
+        while (true)
+        {
+            if (!TryReadProtocolByte(deadline, out byte type))
+            {
+                throw ProtocolSyncError(context, "orphaned response incomplete (no ReadyForQuery)");
+            }
+
+            while (type == 0)
+            {
+                if (!TryReadProtocolByte(deadline, out type))
+                {
+                    throw ProtocolSyncError(context, "truncated orphaned null padding");
+                }
+            }
+
+            // Netezza messages: type + 4-byte header, then type-specific payload.
+            ReadExactWithDeadline(headerScratch[..4], deadline, context, $"truncated orphaned header for type 0x{type:x2}");
+
+            if (type == (byte)BackendMessageCode.ReadyForQuery || type == (byte)'L')
+            {
+                // Discard trailing null padding already buffered after RFQ (non-blocking).
+                // Do not wait — in-flight nulls for this orphan are usually already present
+                // after the inject-test delay; waiting would risk eating the next response.
+                while (TryReadByteNow(out byte b))
+                {
+                    if (b != 0)
+                    {
+                        _protocolSyncPushback = b;
+                        break;
+                    }
+                }
+                if (_protocolSyncPushback is byte leftover && leftover != 0)
+                {
+                    continue;
+                }
+                _protocolSyncPushback = null;
+                return;
+            }
+
+            // '0' and 'A' have only the shared 4-byte header (same as IntepretReturnedByte).
+            if (type == (byte)'0' || type == (byte)'A')
+            {
+                continue;
+            }
+
+            // Binary row: after the 4-byte header skip, payload is 8 + rowLength (same as ResReadDbosTuple).
+            if (type == (byte)BackendMessageCode.RowStandard)
+            {
+                ReadExactWithDeadline(headerScratch, deadline, context, "truncated orphaned RowStandard header");
+                int rowLength = BinaryPrimitives.ReadInt32BigEndian(headerScratch[4..8]);
+                if (rowLength < 0 || rowLength > 10_000_000)
+                {
+                    throw ProtocolSyncError(context, $"invalid orphaned RowStandard rowLength={rowLength}");
+                }
+                SkipBytesExact(rowLength, deadline, context, "truncated orphaned RowStandard payload");
+                continue;
+            }
+
+            // EmptyQueryResponse ('I') carries a length-prefixed body after the header
+            // (same layout as NoticeResponse in IntepretReturnedByte).
+            if (type is (byte)BackendMessageCode.CommandComplete
+                or (byte)BackendMessageCode.ErrorResponse
+                or (byte)BackendMessageCode.NoticeResponse
+                or (byte)BackendMessageCode.EmptyQueryResponse
+                or (byte)BackendMessageCode.RowDescription
+                or (byte)BackendMessageCode.DataRow
+                or (byte)BackendMessageCode.RowDescriptionStandard
+                or (byte)'P')
+            {
+                ReadExactWithDeadline(headerScratch[..4], deadline, context, $"truncated orphaned length for type 0x{type:x2}");
+                int len = BinaryPrimitives.ReadInt32BigEndian(headerScratch[..4]);
+                if (len < 0 || len > 10_000_000)
+                {
+                    throw ProtocolSyncError(context, $"invalid orphaned length={len} for type 0x{type:x2}");
+                }
+                if (len > 0)
+                {
+                    SkipBytesExact(len, deadline, context, $"truncated orphaned payload for type 0x{type:x2}");
+                }
+                continue;
+            }
+
+            // Unknown length-prefixed backend message
+            ReadExactWithDeadline(headerScratch[..4], deadline, context, $"truncated orphaned length for unknown type 0x{type:x2}");
+            int unknownLen = BinaryPrimitives.ReadInt32BigEndian(headerScratch[..4]);
+            if (unknownLen < 0 || unknownLen > 10_000_000)
+            {
+                throw ProtocolSyncError(context, $"invalid orphaned length={unknownLen} for unknown type 0x{type:x2}");
+            }
+            if (unknownLen > 0)
+            {
+                SkipBytesExact(unknownLen, deadline, context, $"truncated orphaned payload for unknown type 0x{type:x2}");
+            }
+        }
+    }
+
+    private async Task EnsureProtocolSyncedAsync(string? context = null, CancellationToken cancellationToken = default)
+    {
+        // Orphaned payloads are already buffered after cancel/timeout waits in practice;
+        // use the same drain against the shared stream.
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureProtocolSynced(context);
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
     private void PreExecution(NzCommand nzCommand, string query)
     {
         _error = null;
@@ -643,6 +974,7 @@ public sealed class NzConnection : DbConnection
         if (State != ConnectionState.Connecting)
         {
             PGUtil.Skip4Bytes(_stream!);
+            EnsureProtocolSynced(query);
         }
         if (query is not null)
         {
@@ -689,6 +1021,7 @@ public sealed class NzConnection : DbConnection
         if (State != ConnectionState.Connecting)
         {
             await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+            await EnsureProtocolSyncedAsync(query, cancellationToken).ConfigureAwait(false);
         }
         if (query is not null)
         {
