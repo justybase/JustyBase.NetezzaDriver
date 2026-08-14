@@ -576,6 +576,9 @@ public sealed class NzConnection : DbConnection
     private readonly ILoggerFactory? _loggerFactory;
 
     private bool _disposed = false;
+    private bool _protocolFaulted;
+    private long _protocolRowNumber;
+    private long _currentProtocolRowNumber;
     protected override void Dispose(bool disposing)
     {
         if (_disposed)
@@ -909,7 +912,7 @@ public sealed class NzConnection : DbConnection
             {
                 ReadExactWithDeadline(headerScratch, deadline, context, "truncated orphaned RowStandard header");
                 int rowLength = BinaryPrimitives.ReadInt32BigEndian(headerScratch[4..8]);
-                if (rowLength < 0 || rowLength > 10_000_000)
+                if (rowLength < 0 || rowLength > ProtocolLengthValidator.MaxPayloadLength)
                 {
                     throw ProtocolSyncError(context, $"invalid orphaned RowStandard rowLength={rowLength}");
                 }
@@ -930,7 +933,7 @@ public sealed class NzConnection : DbConnection
             {
                 ReadExactWithDeadline(headerScratch[..4], deadline, context, $"truncated orphaned length for type 0x{type:x2}");
                 int len = BinaryPrimitives.ReadInt32BigEndian(headerScratch[..4]);
-                if (len < 0 || len > 10_000_000)
+                if (len < 0 || len > ProtocolLengthValidator.MaxPayloadLength)
                 {
                     throw ProtocolSyncError(context, $"invalid orphaned length={len} for type 0x{type:x2}");
                 }
@@ -944,7 +947,7 @@ public sealed class NzConnection : DbConnection
             // Unknown length-prefixed backend message
             ReadExactWithDeadline(headerScratch[..4], deadline, context, $"truncated orphaned length for unknown type 0x{type:x2}");
             int unknownLen = BinaryPrimitives.ReadInt32BigEndian(headerScratch[..4]);
-            if (unknownLen < 0 || unknownLen > 10_000_000)
+            if (unknownLen < 0 || unknownLen > ProtocolLengthValidator.MaxPayloadLength)
             {
                 throw ProtocolSyncError(context, $"invalid orphaned length={unknownLen} for unknown type 0x{type:x2}");
             }
@@ -966,6 +969,7 @@ public sealed class NzConnection : DbConnection
 
     private void PreExecution(NzCommand nzCommand, string query)
     {
+        ThrowIfProtocolFaulted();
         _error = null;
         nzCommand._recordsAffected = -1;
         nzCommand.NewPreparedStatement = new PreparedStatement();
@@ -1014,6 +1018,7 @@ public sealed class NzConnection : DbConnection
 
     private async Task PreExecutionAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
     {
+        ThrowIfProtocolFaulted();
         _error = null;
         nzCommand._recordsAffected = -1;
         nzCommand.NewPreparedStatement = new PreparedStatement();
@@ -1061,6 +1066,15 @@ public sealed class NzConnection : DbConnection
 
     private byte[] Read(int length, byte[]? buffer = null)
     {
+        ValidateProtocolLength(length, "bufferRead");
+        if (buffer is not null && buffer.Length < length)
+        {
+            _protocolFaulted = true;
+            throw new NetezzaException(
+                $"Backend protocol read requested {length} bytes but the supplied buffer has {buffer.Length} bytes. " +
+                "The connection is no longer safe to reuse; reconnect is required.");
+        }
+
         byte[] buf = buffer ?? new byte[length];
         _stream.ReadExactly(buf, 0, length);
         return buf;
@@ -1068,6 +1082,15 @@ public sealed class NzConnection : DbConnection
 
     private async ValueTask<byte[]> ReadAsync(int length, byte[]? buffer = null, CancellationToken cancellationToken = default)
     {
+        ValidateProtocolLength(length, "bufferRead");
+        if (buffer is not null && buffer.Length < length)
+        {
+            _protocolFaulted = true;
+            throw new NetezzaException(
+                $"Backend protocol read requested {length} bytes but the supplied buffer has {buffer.Length} bytes. " +
+                "The connection is no longer safe to reuse; reconnect is required.");
+        }
+
         byte[] buf = buffer ?? new byte[length];
         await _stream.ReadExactlyAsync(buf.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
         return buf;
@@ -1337,6 +1360,7 @@ public sealed class NzConnection : DbConnection
 
     internal bool DoNextStep(NzCommand nzCommand)
     {
+        ThrowIfProtocolFaulted();
         if (_shouldReadByte)
         {
             ReadNextResponseByte();
@@ -1356,6 +1380,7 @@ public sealed class NzConnection : DbConnection
 
     internal async ValueTask<bool> DoNextStepAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
+        ThrowIfProtocolFaulted();
         if (_shouldReadByte)
         {
             await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
@@ -1396,6 +1421,162 @@ public sealed class NzConnection : DbConnection
     {
         await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
         return HUnpack(_tmp_buffer);
+    }
+
+    private long ProtocolReadOffset => _stream is ProtocolCountingStream countingStream
+        ? countingStream.BytesRead
+        : -1;
+
+    private string ProtocolResponseType => (uint)_lastResponse <= byte.MaxValue
+        ? $"{(char)_lastResponse} (0x{_lastResponse:X2})"
+        : $"0x{_lastResponse:X}";
+
+    private int ValidateProtocolLength(
+        int length,
+        string field,
+        bool allowZero = true,
+        long? offset = null)
+    {
+        var context =
+            $"response={ProtocolResponseType}, row={_currentProtocolRowNumber}, offset={offset ?? ProtocolReadOffset}";
+        try
+        {
+            return ProtocolLengthValidator.Validate(length, field, allowZero, context);
+        }
+        catch (NetezzaException)
+        {
+            _protocolFaulted = true;
+            throw;
+        }
+    }
+
+    private int ValidateProtocolLengthAfterOverhead(
+        int frameLength,
+        int overhead,
+        string frameField,
+        string payloadField,
+        bool payloadAllowZero = true)
+    {
+        var context =
+            $"response={ProtocolResponseType}, row={_currentProtocolRowNumber}, offset={ProtocolReadOffset}";
+        try
+        {
+            int payloadLength = ProtocolLengthValidator.ValidateAfterOverhead(
+                frameLength,
+                overhead,
+                frameField,
+                payloadField,
+                payloadAllowZero,
+                context);
+
+            _logger?.LogDebug(
+                "Backend protocol derived length: ResponseType={ResponseType} FrameField={FrameField} " +
+                "PayloadField={PayloadField} FrameLength={FrameLength} Overhead={Overhead} " +
+                "PayloadLength={PayloadLength} Offset={Offset} Row={Row}",
+                ProtocolResponseType,
+                frameField,
+                payloadField,
+                frameLength,
+                overhead,
+                payloadLength,
+                ProtocolReadOffset,
+                _currentProtocolRowNumber);
+
+            return payloadLength;
+        }
+        catch (NetezzaException)
+        {
+            _protocolFaulted = true;
+            throw;
+        }
+    }
+
+    private void LogProtocolLength(
+        string field,
+        ReadOnlySpan<byte> rawBytes,
+        int value,
+        long offset)
+    {
+        _logger?.LogDebug(
+            "Backend protocol length: ResponseType={ResponseType} ResponseCode=0x{ResponseCode:X2} Field={Field} Value={Value} Raw={RawBytes} Offset={Offset} Row={Row}",
+            ProtocolResponseType,
+            _lastResponse,
+            field,
+            value,
+            Convert.ToHexString(rawBytes),
+            offset,
+            _currentProtocolRowNumber);
+    }
+
+    private int ReadProtocolInt32(string field)
+    {
+        var offset = ProtocolReadOffset;
+        Span<byte> rawBytes = stackalloc byte[sizeof(int)];
+        _stream.ReadExactly(rawBytes);
+        var value = BinaryPrimitives.ReadInt32BigEndian(rawBytes);
+        LogProtocolLength(field, rawBytes, value, offset);
+        return value;
+    }
+
+    private int ReadProtocolLength(string field, bool allowZero = true)
+    {
+        var offset = ProtocolReadOffset;
+        var value = ReadProtocolInt32(field);
+        return ValidateProtocolLength(value, field, allowZero, offset);
+    }
+
+    private short ReadProtocolInt16Length(string field, bool allowZero = true)
+    {
+        var offset = ProtocolReadOffset;
+        Span<byte> rawBytes = stackalloc byte[sizeof(short)];
+        _stream.ReadExactly(rawBytes);
+        var value = BinaryPrimitives.ReadInt16BigEndian(rawBytes);
+        LogProtocolLength(field, rawBytes, value, offset);
+        return checked((short)ValidateProtocolLength(value, field, allowZero, offset));
+    }
+
+    private async ValueTask<int> ReadProtocolInt32Async(
+        string field,
+        CancellationToken cancellationToken = default)
+    {
+        var offset = ProtocolReadOffset;
+        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, sizeof(int)), cancellationToken)
+            .ConfigureAwait(false);
+        var value = BinaryPrimitives.ReadInt32BigEndian(_tmp_buffer.AsSpan(0, sizeof(int)));
+        LogProtocolLength(field, _tmp_buffer.AsSpan(0, sizeof(int)), value, offset);
+        return value;
+    }
+
+    private async ValueTask<int> ReadProtocolLengthAsync(
+        string field,
+        bool allowZero = true,
+        CancellationToken cancellationToken = default)
+    {
+        var offset = ProtocolReadOffset;
+        var value = await ReadProtocolInt32Async(field, cancellationToken).ConfigureAwait(false);
+        return ValidateProtocolLength(value, field, allowZero, offset);
+    }
+
+    private async ValueTask<short> ReadProtocolInt16LengthAsync(
+        string field,
+        bool allowZero = true,
+        CancellationToken cancellationToken = default)
+    {
+        var offset = ProtocolReadOffset;
+        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, sizeof(short)), cancellationToken)
+            .ConfigureAwait(false);
+        var value = BinaryPrimitives.ReadInt16BigEndian(_tmp_buffer.AsSpan(0, sizeof(short)));
+        LogProtocolLength(field, _tmp_buffer.AsSpan(0, sizeof(short)), value, offset);
+        return checked((short)ValidateProtocolLength(value, field, allowZero, offset));
+    }
+
+    private void ThrowIfProtocolFaulted()
+    {
+        if (_protocolFaulted)
+        {
+            throw new NetezzaException(
+                "The connection encountered an invalid backend protocol length and cannot be reused; reconnect is required.");
+        }
     }
 
     internal async ValueTask ReadNextResponseByteAsync(CancellationToken cancellationToken = default)
@@ -1476,7 +1657,7 @@ public sealed class NzConnection : DbConnection
             case (byte)'u':
                 PGUtil.Skip4Bytes(_stream, 10);
                 PGUtil.Skip4Bytes(_stream, 16);
-                int length = PGUtil.ReadInt32(_stream);
+                int length = ReadProtocolLength("externalTable.fileNameLength");
                 var fileNameBytes = Read(length);
                 string fileName = Encoding.UTF8.GetString(fileNameBytes, 0, length);
                 InitializeUnloadFileStream(fileName);
@@ -1508,7 +1689,9 @@ public sealed class NzConnection : DbConnection
             case (byte)'u':
                 await SkipBytesAsync(10, cancellationToken).ConfigureAwait(false);
                 await SkipBytesAsync(16, cancellationToken).ConfigureAwait(false);
-                int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+                int length = await ReadProtocolLengthAsync(
+                    "externalTable.fileNameLength",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
                 var fileNameBytes = await ReadAsync(length, cancellationToken: cancellationToken).ConfigureAwait(false);
                 string fileName = Encoding.UTF8.GetString(fileNameBytes, 0, length);
                 await InitializeUnloadFileStreamAsync(fileName, cancellationToken).ConfigureAwait(false);
@@ -1536,13 +1719,17 @@ public sealed class NzConnection : DbConnection
     private bool IntepretReturnedByte(NzCommand nzCommand)
     {
         _shouldReadByte = true;
-        _logger?.LogDebug("Backend response: {Response}", (char)_lastResponse);
-        PGUtil.Skip4Bytes(_stream);
+        _logger?.LogDebug(
+            "Backend response: ResponseType={ResponseType} ResponseCode=0x{ResponseCode:X2} Row={Row}",
+            ProtocolResponseType,
+            _lastResponse,
+            _currentProtocolRowNumber);
+        ReadProtocolInt32("frameHeaderValue");
 
         if (_lastResponse == (byte)BackendMessageCode.CommandComplete)
         {
             // portal query command, no tuples returned
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("commandCompletePayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
             HandleCommandComplete(data, length,  nzCommand);
@@ -1567,7 +1754,7 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)'P')//80
         {
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("preparedPayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
             _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
@@ -1575,7 +1762,7 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.ErrorResponse)
         {
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("errorPayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
             _error = Encoding.UTF8.GetString(data,0,length);
@@ -1585,7 +1772,7 @@ public sealed class NzConnection : DbConnection
         //this STARTS (after 'P') single rowset
         else if (_lastResponse == (byte)BackendMessageCode.RowDescription)
         {
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("rowDescriptionPayloadLength");
             nzCommand.NewPreparedStatement ??= new PreparedStatement();
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
@@ -1595,14 +1782,14 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.DataRow)//read rows in schema/system queries - hot path
         {
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("dataRowPayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
             HandleDataRow(data, nzCommand); 
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescriptionStandard)// metadata for standard query, occurs after BackendMessageCode.RowDescription
         {
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("rowDescriptionStandardPayloadLength");
             _tupdesc = new DbosTupleDesc();
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
@@ -1621,8 +1808,13 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)'e')
         {
-            int length = PGUtil.ReadInt32(_stream);
-            string logDir = Encoding.UTF8.GetString(Read(length - 1));
+            int length = ReadProtocolLength("fileTransfer.logDirectoryLength", allowZero: false);
+            int logDirectoryPayloadLength = ValidateProtocolLengthAfterOverhead(
+                length,
+                1,
+                "fileTransfer.logDirectoryLength",
+                "fileTransfer.logDirectoryPayloadLength");
+            string logDir = Encoding.UTF8.GetString(Read(logDirectoryPayloadLength));
 
             _stream.ReadByte();
             // ignore one byte as it is null character at the end of the string
@@ -1647,7 +1839,7 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.NoticeResponse)
         {
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("noticePayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
             string notice = Encoding.UTF8.GetString(data[0..length]);
@@ -1656,7 +1848,7 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)'I')
         {
-            int length = PGUtil.ReadInt32(_stream);
+            int length = ReadProtocolLength("emptyQueryPayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
             string notice = Encoding.UTF8.GetString(data[0..length]);
@@ -1671,12 +1863,19 @@ public sealed class NzConnection : DbConnection
     private async ValueTask<bool> IntepretReturnedByteAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
         _shouldReadByte = true;
-        _logger?.LogDebug("Backend response: {Response}", (char)_lastResponse);
-        await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+        _logger?.LogDebug(
+            "Backend response: ResponseType={ResponseType} ResponseCode=0x{ResponseCode:X2} Row={Row}",
+            ProtocolResponseType,
+            _lastResponse,
+            _currentProtocolRowNumber);
+        await ReadProtocolInt32Async("frameHeaderValue", cancellationToken)
+            .ConfigureAwait(false);
 
         if (_lastResponse == (byte)BackendMessageCode.CommandComplete)
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "commandCompletePayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             HandleCommandComplete(data, length, nzCommand);
@@ -1698,14 +1897,18 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)'P')
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "preparedPayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
         }
         else if (_lastResponse == (byte)BackendMessageCode.ErrorResponse)
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "errorPayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             _error = Encoding.UTF8.GetString(data, 0, length);
@@ -1713,7 +1916,9 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescription)
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "rowDescriptionPayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             nzCommand.NewPreparedStatement ??= new PreparedStatement();
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
@@ -1721,14 +1926,18 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.DataRow)
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "dataRowPayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             HandleDataRow(data, nzCommand);
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescriptionStandard)
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "rowDescriptionStandardPayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             _tupdesc = new DbosTupleDesc();
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
@@ -1744,8 +1953,18 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)'e')
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
-            var logDirBytes = await ReadAsync(length - 1, cancellationToken: cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "fileTransfer.logDirectoryLength",
+                allowZero: false,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            int logDirectoryPayloadLength = ValidateProtocolLengthAfterOverhead(
+                length,
+                1,
+                "fileTransfer.logDirectoryLength",
+                "fileTransfer.logDirectoryPayloadLength");
+            var logDirBytes = await ReadAsync(
+                logDirectoryPayloadLength,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             string logDir = Encoding.UTF8.GetString(logDirBytes);
 
             _ = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
@@ -1769,7 +1988,9 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.NoticeResponse)
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "noticePayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             string notice = Encoding.UTF8.GetString(data, 0, length);
@@ -1778,7 +1999,9 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)'I')
         {
-            int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+            int length = await ReadProtocolLengthAsync(
+                "emptyQueryPayloadLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             string notice = Encoding.UTF8.GetString(data, 0, length);
@@ -1793,7 +2016,7 @@ public sealed class NzConnection : DbConnection
 
     private void XferTable()
     {
-        PGUtil.Skip4Bytes(_stream);
+        ReadProtocolInt32("externalTable.frameHeaderValue");
         int clientVersion = 1;
 
         byte charByte = Read(1)[0];
@@ -1817,7 +2040,7 @@ public sealed class NzConnection : DbConnection
         Flush();
 
         int format = PGUtil.ReadInt32(_stream);
-        int blockSize = PGUtil.ReadInt32(_stream);
+        int blockSize = ReadProtocolLength("externalTable.blockSize", allowZero: false);
         _logger?.LogInformation("Format={Format} Block size={BlockSize} Host version={HostVersion}", format, blockSize, hostVersion);
 
         int effectiveBlockSize = Math.Max(blockSize, 1);
@@ -1904,7 +2127,9 @@ public sealed class NzConnection : DbConnection
 
     private async Task XferTableAsync(CancellationToken cancellationToken = default)
     {
-        await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+        await ReadProtocolInt32Async(
+            "externalTable.frameHeaderValue",
+            cancellationToken).ConfigureAwait(false);
         int clientVersion = 1;
 
         byte charByte = (byte)await ReadByteAsync(cancellationToken).ConfigureAwait(false);
@@ -1925,7 +2150,10 @@ public sealed class NzConnection : DbConnection
         await FlushAsync(cancellationToken).ConfigureAwait(false);
 
         int format = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
-        int blockSize = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+        int blockSize = await ReadProtocolLengthAsync(
+            "externalTable.blockSize",
+            allowZero: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         _logger?.LogInformation("Format={Format} Block size={BlockSize} Host version={HostVersion}", format, blockSize, hostVersion);
 
         int effectiveBlockSize = Math.Max(blockSize, 1);
@@ -2024,7 +2252,7 @@ public sealed class NzConnection : DbConnection
         {
             while (true)
             {
-                int numBytes = PGUtil.ReadInt32(_stream);
+                int numBytes = ReadProtocolLength("fileTransfer.chunkLength");
 
                 if (numBytes == 0)  // zeros means EOF, no more data
                 {
@@ -2095,7 +2323,9 @@ public sealed class NzConnection : DbConnection
             using StreamWriter writer = new StreamWriter(fh, Encoding.UTF8);
             while (true)
             {
-                int numBytes = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+                int numBytes = await ReadProtocolLengthAsync(
+                    "fileTransfer.chunkLength",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
 
                 if (numBytes == 0)
                 {
@@ -2146,7 +2376,7 @@ public sealed class NzConnection : DbConnection
             throw new NetezzaException("Unload file stream is not initialized.");
         }
 
-        PGUtil.Skip4Bytes(_stream);
+        ReadProtocolInt32("externalTable.receiveFrameHeaderValue");
 
         while (true)
         {
@@ -2166,7 +2396,7 @@ public sealed class NzConnection : DbConnection
             if (status == Core.EXTAB_SOCK_DATA)
             {
                 // get number of bytes in block
-                int numBytes = PGUtil.ReadInt32(_stream);
+                int numBytes = ReadProtocolLength("externalTable.chunkLength");
                 byte[] bytes = ArrayPool<byte>.Shared.Rent(numBytes);
                 try
                 {
@@ -2197,11 +2427,11 @@ public sealed class NzConnection : DbConnection
             if (status == Core.EXTAB_SOCK_ERROR)
             {
                 //int len = HUnpack(_read(2));
-                short len = PGUtil.ReadInt16(_stream);
+                short len = ReadProtocolInt16Length("externalTable.errorMessageLength");
 
                 string errorMsg = NzConnectionHelpers.ClientEncoding.GetString(Read(len));
                 //len = HUnpack(_read(2));
-                len = PGUtil.ReadInt16(_stream);
+                len = ReadProtocolInt16Length("externalTable.errorObjectLength");
                 string errorObject = NzConnectionHelpers.ClientEncoding.GetString(Read(len));
 
                 _logger?.LogWarning("unload - ErrorMsg: {ErrorMsg}", errorMsg);
@@ -2226,7 +2456,9 @@ public sealed class NzConnection : DbConnection
             throw new NetezzaException("Unload file stream is not initialized.");
         }
 
-        await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+        await ReadProtocolInt32Async(
+            "externalTable.receiveFrameHeaderValue",
+            cancellationToken).ConfigureAwait(false);
 
         while (true)
         {
@@ -2244,7 +2476,9 @@ public sealed class NzConnection : DbConnection
 
             if (status == Core.EXTAB_SOCK_DATA)
             {
-                int numBytes = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+                int numBytes = await ReadProtocolLengthAsync(
+                    "externalTable.chunkLength",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
                 try
                 {
                     byte[] bytes = ArrayPool<byte>.Shared.Rent(numBytes);
@@ -2277,9 +2511,13 @@ public sealed class NzConnection : DbConnection
 
             if (status == Core.EXTAB_SOCK_ERROR)
             {
-                short len = await ReadInt16Async(cancellationToken).ConfigureAwait(false);
+                short len = await ReadProtocolInt16LengthAsync(
+                    "externalTable.errorMessageLength",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
                 string errorMsg = NzConnectionHelpers.ClientEncoding.GetString(await ReadAsync(len, cancellationToken: cancellationToken).ConfigureAwait(false));
-                len = await ReadInt16Async(cancellationToken).ConfigureAwait(false);
+                len = await ReadProtocolInt16LengthAsync(
+                    "externalTable.errorObjectLength",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
                 string errorObject = NzConnectionHelpers.ClientEncoding.GetString(await ReadAsync(len, cancellationToken: cancellationToken).ConfigureAwait(false));
 
                 _logger?.LogWarning("unload - ErrorMsg: {ErrorMsg}", errorMsg);
@@ -2299,6 +2537,8 @@ public sealed class NzConnection : DbConnection
 
     private void ResGetDbosColumnDescriptions(byte[] data)
     {
+        _protocolRowNumber = 0;
+        _currentProtocolRowNumber = 0;
         int dataIdx = 0;
         _tupdesc.Version = IUnpack(data, dataIdx);
         _tupdesc.NullsAllowed = IUnpack(data, dataIdx + 4);
@@ -2338,6 +2578,11 @@ public sealed class NzConnection : DbConnection
 
         _tupdesc.DateStyle = IUnpack(data, dataIdx);
         _tupdesc.EuroDates = IUnpack(data, dataIdx + 4);
+        _logger?.LogDebug(
+            "RowStandard descriptor: NumFields={NumFields} MaxRecordSize={MaxRecordSize} FixedFieldsSize={FixedFieldsSize}",
+            _tupdesc.NumFields,
+            _tupdesc.MaxRecordSize,
+            _tupdesc.FixedFieldsSize);
     }
 
 
@@ -2384,15 +2629,27 @@ public sealed class NzConnection : DbConnection
     private void ResReadDbosTuple(NzCommand nzCommand)
     {
         int numFields = _tupdesc.NumFields;
-        int length = PGUtil.ReadInt32(_stream);//row length
+        _currentProtocolRowNumber = ++_protocolRowNumber;
+        int rowLength = ReadProtocolLength("rowStandard.rowLength");
+        int payloadLength = ReadProtocolLength("rowStandard.dbosPayloadLength", allowZero: false);
 
-        _logger?.LogDebug("Length of the message from backend: {Length}", length);
-        length = PGUtil.ReadInt32(_stream);//we must skip 4 bytes ?
-        _logger?.LogDebug("Length of the message from backend: {Length}", length);
+        _logger?.LogDebug(
+            "RowStandard payload: Row={Row} RowLength={RowLength} PayloadLength={PayloadLength} NumFields={NumFields} MaxRecordSize={MaxRecordSize}",
+            _currentProtocolRowNumber,
+            rowLength,
+            payloadLength,
+            numFields,
+            _tupdesc.MaxRecordSize);
 
-        RegenerateBuffer(length);
-        byte[] data = Read(length, _tmp_buffer);
-        _logger?.LogDebug("Actual message is: {Data}", BitConverter.ToString(data,0,length));
+        RegenerateBuffer(payloadLength);
+        long payloadOffset = ProtocolReadOffset;
+        byte[] data = Read(payloadLength, _tmp_buffer);
+        _logger?.LogDebug(
+            "RowStandard payload consumed: Row={Row} OffsetStart={OffsetStart} OffsetEnd={OffsetEnd} BytesRead={BytesRead}",
+            _currentProtocolRowNumber,
+            payloadOffset,
+            ProtocolReadOffset,
+            payloadLength);
 
         ParseDbosTupleData(nzCommand, data, numFields);
     }
@@ -2400,15 +2657,32 @@ public sealed class NzConnection : DbConnection
     private async ValueTask ResReadDbosTupleAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
         int numFields = _tupdesc.NumFields;
-        int length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
+        _currentProtocolRowNumber = ++_protocolRowNumber;
+        int rowLength = await ReadProtocolLengthAsync(
+            "rowStandard.rowLength",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        int payloadLength = await ReadProtocolLengthAsync(
+            "rowStandard.dbosPayloadLength",
+            allowZero: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        _logger?.LogDebug("Length of the message from backend: {Length}", length);
-        length = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
-        _logger?.LogDebug("Length of the message from backend: {Length}", length);
+        _logger?.LogDebug(
+            "RowStandard payload: Row={Row} RowLength={RowLength} PayloadLength={PayloadLength} NumFields={NumFields} MaxRecordSize={MaxRecordSize}",
+            _currentProtocolRowNumber,
+            rowLength,
+            payloadLength,
+            numFields,
+            _tupdesc.MaxRecordSize);
 
-        RegenerateBuffer(length);
-        byte[] data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
-        _logger?.LogDebug("Actual message is: {Data}", BitConverter.ToString(data, 0, length));
+        RegenerateBuffer(payloadLength);
+        long payloadOffset = ProtocolReadOffset;
+        byte[] data = await ReadAsync(payloadLength, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+        _logger?.LogDebug(
+            "RowStandard payload consumed: Row={Row} OffsetStart={OffsetStart} OffsetEnd={OffsetEnd} BytesRead={BytesRead}",
+            _currentProtocolRowNumber,
+            payloadOffset,
+            ProtocolReadOffset,
+            payloadLength);
 
         ParseDbosTupleData(nzCommand, data, numFields);
     }
@@ -2611,6 +2885,7 @@ public sealed class NzConnection : DbConnection
 
     private void RegenerateBuffer(int length)
     {
+        ValidateProtocolLength(length, "bufferAllocation");
         if (_tmp_buffer.Length < length)
         {
             if (_tmp_buffer.Length > 0)
@@ -3192,7 +3467,10 @@ public sealed class NzConnection : DbConnection
 
         if (response is not null)
         {
-            _stream = response;
+            _stream = new ProtocolCountingStream(response);
+            _protocolFaulted = false;
+            _protocolRowNumber = 0;
+            _currentProtocolRowNumber = 0;
         }
         else
         {
@@ -3234,7 +3512,10 @@ public sealed class NzConnection : DbConnection
 
         if (response is not null)
         {
-            _stream = response;
+            _stream = new ProtocolCountingStream(response);
+            _protocolFaulted = false;
+            _protocolRowNumber = 0;
+            _currentProtocolRowNumber = 0;
         }
         else
         {
