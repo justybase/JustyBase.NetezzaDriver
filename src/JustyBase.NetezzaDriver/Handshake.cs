@@ -1259,7 +1259,9 @@ internal sealed class Handshake
 
             if (response == (byte)BackendMessageCode.NoticeResponse)
             {
-                int length = PGUtil.ReadInt32(_stream);
+                int length = ProtocolLengthValidator.Validate(
+                    PGUtil.ReadInt32(_stream),
+                    "handshake.noticePayloadLength");
 
                 byte[] bytes = new byte[length];
                 _stream.ReadExactly(bytes, 0, length);
@@ -1314,7 +1316,9 @@ internal sealed class Handshake
 
             if (response == (byte)BackendMessageCode.NoticeResponse)
             {
-                int length = await ReadInt32Async( cancellationToken).ConfigureAwait(false);
+                int length = ProtocolLengthValidator.Validate(
+                    await ReadInt32Async(cancellationToken).ConfigureAwait(false),
+                    "handshake.noticePayloadLength");
 
                 byte[] bytes = new byte[length];
                 await _stream.ReadExactlyAsync(bytes.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
