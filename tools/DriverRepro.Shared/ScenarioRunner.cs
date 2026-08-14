@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
+using System.Globalization;
 using JustyBase.NetezzaDriver;
 using Microsoft.Extensions.Logging;
 
@@ -232,32 +233,7 @@ internal static class ScenarioRunner
         }
 
         context.Phase = "second result FieldCount";
-        int secondColumns = reader.FieldCount;
-        if (secondColumns != 1)
-        {
-            throw new InvalidOperationException($"Expected one column in SELECT 1 result, got {secondColumns}.");
-        }
-
-        context.Phase = "second result Read";
-        context.Row = 1;
-        if (!reader.Read())
-        {
-            throw new InvalidOperationException("The SELECT 1 result had no row.");
-        }
-
-        context.Phase = "second result GetValue";
-        context.Column = 0;
-        object value = reader.GetValue(0);
-        if (value is not int and not long and not short and not byte and not decimal)
-        {
-            throw new InvalidOperationException($"SELECT 1 returned unexpected CLR type {value.GetType().FullName}.");
-        }
-
-        context.Phase = "second result EOF";
-        if (reader.Read())
-        {
-            throw new InvalidOperationException("The SELECT 1 result unexpectedly contained more than one row.");
-        }
+        ValidateScalarOne(reader, context, "second result SELECT 1");
 
         return Task.FromResult(new ScenarioResult(
             first.Rows,
@@ -288,6 +264,18 @@ internal static class ScenarioRunner
             MaterializeCurrentRow(reader, context, rows, columns);
             await DelayBetweenRowsAsync(options, CancellationToken.None);
         }
+
+        int firstRestRow = rows + 1;
+        ReadAsyncRowContext(context, firstRestRow, "slow first rest reader.ReadAsync");
+        if (!await reader.ReadAsync(CancellationToken.None))
+        {
+            throw new InvalidOperationException(
+                $"The exact query ended at the preview boundary; row {firstRestRow} was required.");
+        }
+
+        rows++;
+        MaterializeCurrentRow(reader, context, rows, columns);
+        await DelayBetweenRowsAsync(options, CancellationToken.None);
 
         while (true)
         {
@@ -407,6 +395,15 @@ internal static class ScenarioRunner
             ReadCurrentRow(reader, context, ++rows, columns, materialize: false, "minimal-preview");
         }
 
+        context.Phase = "minimal first rest reader.Read";
+        context.Row = rows + 1;
+        if (!reader.Read())
+        {
+            throw new InvalidOperationException(
+                $"The exact query ended at the preview boundary; row {rows + 1} was required.");
+        }
+
+        rows++;
         while (true)
         {
             context.Phase = "minimal rest reader.Read";
@@ -468,6 +465,20 @@ internal static class ScenarioRunner
             ReadCurrentRow(reader, context, ++rows, columns, materialize, "preview");
         }
 
+        context.Phase = "rest first reader.Read (row 501)";
+        context.Row = rows + 1;
+        if (!reader.Read())
+        {
+            throw new InvalidOperationException(
+                $"The exact query ended at the preview boundary; row {rows + 1} was required.");
+        }
+
+        rows++;
+        if (materialize)
+        {
+            MaterializeCurrentRow(reader, context, rows, columns);
+        }
+
         while (true)
         {
             context.Phase = "rest reader.Read";
@@ -517,6 +528,25 @@ internal static class ScenarioRunner
             {
                 await Task.Delay(rowDelayMilliseconds, cancellationToken);
             }
+        }
+
+        int firstRestRow = rows + 1;
+        ReadAsyncRowContext(context, firstRestRow, "rest first reader.ReadAsync (row 501)");
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException(
+                $"The exact query ended at the preview boundary; row {firstRestRow} was required.");
+        }
+
+        rows++;
+        if (materialize)
+        {
+            MaterializeCurrentRow(reader, context, rows, columns);
+        }
+
+        if (rowDelayMilliseconds > 0)
+        {
+            await Task.Delay(rowDelayMilliseconds, cancellationToken);
         }
 
         while (true)
@@ -637,20 +667,43 @@ internal static class ScenarioRunner
         using NzCommand command = connection.CreateCommand("SELECT 1");
         using DbDataReader reader = command.ExecuteReader();
 
+        ValidateScalarOne(reader, context, description);
+    }
+
+    private static void ValidateScalarOne(
+        DbDataReader reader,
+        ScenarioContext context,
+        string description)
+    {
+        context.Phase = $"{description} FieldCount";
+        if (reader.FieldCount != 1)
+        {
+            throw new InvalidOperationException(
+                $"{description} returned {reader.FieldCount} columns; exactly one was required.");
+        }
+
         context.Row = 1;
         if (!reader.Read())
         {
-            throw new InvalidOperationException($"SELECT 1 returned no row ({description}).");
+            throw new InvalidOperationException($"{description} returned no row.");
         }
 
+        context.Phase = $"{description} GetValue";
         context.Column = 0;
-        _ = reader.GetValue(0);
+        object value = reader.GetValue(0);
+        int actualValue = Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        if (actualValue != 1)
+        {
+            throw new InvalidOperationException(
+                $"{description} returned value {value}; expected numeric value 1.");
+        }
+
         context.Column = -1;
 
-        context.Phase = $"scalar SELECT 1 EOF ({description})";
+        context.Phase = $"{description} EOF";
         if (reader.Read())
         {
-            throw new InvalidOperationException($"SELECT 1 returned more than one row ({description}).");
+            throw new InvalidOperationException($"{description} returned more than one row.");
         }
     }
 
