@@ -18,15 +18,18 @@ public class NoticeTests
     {
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
         connection.Open();
-        using var command = connection.CreateCommand();
+        using var command = connection.CreateCommand("CALL CUSTOMER_DOTNET();");
         List<string> notices = new List<string>();
         connection.NoticeReceived += (o,e) =>
         {
             notices.Add(e.Message);
         };
-        command.CommandText = "CALL CUSTOMER_DOTNET();";
         command.ExecuteNonQuery();
-        var expected = new List<string>() { "The customer name is alpha\n", "The customer location is beta\n" };
+        var expected = new List<string>() { "The customer name is alpha", "The customer location is beta" };
         Assert.Equal(expected, notices);
+        Assert.Equal(expected, command.Notices);
+
+        command.ExecuteNonQuery();
+        Assert.Equal(expected, command.Notices);
     }
 }

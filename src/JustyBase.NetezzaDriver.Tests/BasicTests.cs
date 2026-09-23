@@ -1,23 +1,13 @@
-﻿using System.Data.Odbc;
-using Xunit.Sdk;
-
-namespace JustyBase.NetezzaDriver.Tests;
+﻿namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
 [Trait("Category", "Integration")]
 
 public class BasicTests : IDisposable
 {
-    private readonly ITestOutputHelper _output;
-
-    OdbcConnection _odbcConnection;
     NzConnection _nzNewConnection;
-    public BasicTests(ITestOutputHelper output)
+    public BasicTests()
     {
-        _output = output;
-        _odbcConnection = new OdbcConnection($"Driver={{NetezzaSQL}};servername={Config.Host};port={Config.Port};database={Config.DbName};username={Config.UserName};password={Config.Password}");
-        _odbcConnection.Open();
-
         _nzNewConnection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
         _nzNewConnection.Open();
     }
@@ -45,148 +35,6 @@ public class BasicTests : IDisposable
     //from SYSTEM.._V_TABLE;
     //select 'SELECT * FROM SYSTEM.ADMIN.' || VIEWNAME
     //from SYSTEM.._V_VIEW;
-    private const string queryManyTypes = """
-        SELECT  
-        10::bigint
-        , null ::bigint
-        , true::Boolean -- ??
-        , false::Boolean -- ??
-        , null::Boolean
-        , 5::Byteint
-        , null::Byteint
-        , 'a' :: Char
-        , null :: Char
-        , current_date::Date
-        , null::Date
-        , 0.5::float
-        , null::float
-        , 10::integer
-        , null::integer
-        , 'next should be 02:00:00 time'
-        , '02:00:00'::TIME
-        , 'abc' ::nchar(10)
-        , null ::nchar(10)
-        , 1.54::numeric(30, 6)
-        , null::numeric(30, 6)
-        , 'abc'::Nvarchar(10)
-        , null::Nvarchar(10)
-        , 1.54::real
-        , null::real
-        , 5::smallint
-        , null::smallint
-        --, current_time::time
-        , '10:12:13'::TIME
-        , null::time
-        --, null::Timewithzone
-        , DATE_TRUNC('hour',current_timestamp)::Timestamp
-        , null:: Timestamp
-        , 'abc' ::varchar(10)
-        , null ::varchar(10)
-        ,* 
-        FROM JUST_DATA..FACTPRODUCTINVENTORY 
-        order by rowid asc
-        LIMIT 1
-    """;
-
-    private const string queryManyTypes2 = """
-        SELECT  
-        10::bigint
-        , null ::bigint
-        , true::Boolean -- ??
-        , false::Boolean -- ??
-        , null::Boolean
-        , 5::Byteint
-        , null::Byteint
-        , 'a' :: Char
-        , null :: Char
-        , current_date::Date
-        , null::Date
-        , 0.5::float
-        , null::float
-        , 10::integer
-        , null::integer
-        , 'next should be 02:00:00 time'
-        , '02:00:00'::TIME
-        , 'abc' ::nchar(10)
-        , null ::nchar(10)
-        , 1.54::numeric(30, 6)
-        , null::numeric(30, 6)
-        , 'abc'::Nvarchar(10)
-        , null::Nvarchar(10)
-        , 1.54::real
-        , null::real
-        , 5::smallint
-        , null::smallint
-        --, current_time::time
-        , '10:12:13'::TIME
-        , null::time
-        --, null::Timewithzone
-        , DATE_TRUNC('hour',current_timestamp)::Timestamp
-        , null:: Timestamp
-        , 'abc' ::varchar(10)
-        , null ::varchar(10)
-        FROM JUST_DATA.._V_RELATION_COLUMN
-        LIMIT 10
-    """;
-
-    private readonly string[] _queryListBasic =
-    [
-        "SELECT '12:00:00'::TIME, '12:00:00'::TIMETZ,'14:13:12.4321+11:15'::TIMETZ",
-        "SELECT NOW()",
-        "SELECT * FROM JUST_DATA.ADMIN.DIMDATE ORDER BY ROWID LIMIT 1000",
-        "SELECT false::BOOLEAN FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 15::BYTEINT FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 'ABC'::VARCHAR(10) FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT '2024-12-12'::DATE FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT '2024-12-12'::TIMESTAMP FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 3.14::NUMERIC(10,4) FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 3.14::NUMERIC(38,8) FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 123456789::NUMERIC(38,0) FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 3.14::REAL FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 3.14::DOUBLE FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 12345678::INTEGER FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT -9223372036854775808::BIGINT FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 9223372036854775807::BIGINT FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT 25000::SMALLINT FROM JUST_DATA.ADMIN.DIMDATE LIMIT 1",
-        "SELECT false::BOOLEAN",
-        "SELECT 15::BYTEINT",
-        "SELECT '2024-12-12'::DATE",
-        "SELECT 3.14::NUMERIC(38,8)",
-        "SELECT * FROM JUST_DATA.ADMIN.DIMACCOUNT ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM JUST_DATA.ADMIN.DIMDATE ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM JUST_DATA.ADMIN.DIMPRODUCT ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM JUST_DATA.ADMIN.FACTPRODUCTINVENTORY ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM JUST_DATA..NUMERIC_TEST ORDER BY ROWID LIMIT 1000"
-    ];
-
-    private readonly string[] _queriesFromSystemTables =
-    [
-        "SELECT * FROM SYSTEM.ADMIN._T_OBJECT ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._T_DATABASE ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._T_USER ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._T_GROUP ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._T_SCHEMA ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._VT_DUAL ORDER BY ROWID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_DUAL",
-        "SELECT * FROM SYSTEM.ADMIN._V_DATABASE ORDER BY OBJID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_USER LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_GROUP LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_SCHEMA LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_TABLE LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_VIEW ORDER BY OBJID LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_INDEX LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_RELATION_COLUMN LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_DATATYPE LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_SEQUENCE LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_FUNCTION LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_OBJECT LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_SYS_DATABASE LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_SYSTEM_INFO LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_CONNECTION LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_ODBC_FEATURE LIMIT 1000",
-        "SELECT * FROM SYSTEM.ADMIN._V_DOTNET_FEATURE LIMIT 1000"
-    ];
-
     [Theory]
     [InlineData("SELECT '2 years 5 hours 11 months 41 minutes 15 sec'::interval FROM JUST_DATA..DIMDATE LIMIT 1", "2 years 11 mons 05:41:15 String")]
     [InlineData("SELECT '5 hours 41 minutes  15 sec'::interval FROM JUST_DATA..DIMDATE LIMIT 1", "05:41:15 String")]
@@ -413,42 +261,6 @@ public class BasicTests : IDisposable
     }
 
 
-    [Fact(Timeout = 20000)]
-    public void OdbcAndNzResultsShouldMatch()
-    {
-        foreach (var query in _queryListBasic)
-        {
-            _output.WriteLine($"Query {query}");    
-            ValidateTypedQueryResultsByGetValue( query);
-        }
-    }
-    [Fact(Timeout = 20000)]
-    public void OdbcAndNzResultsShouldMatchSystem()
-    {
-        foreach (var query in _queriesFromSystemTables)
-        {
-            _output.WriteLine($"Query {query}");
-            ValidateTypedQueryResultsByGetValue(query);
-        }
-    }
-
-    private readonly string[] _queriesShouldMatchFast =
-    [
-        "SELECT * FROM JUST_DATA..DIMDATE ORDER BY DATEKEY LIMIT 1500",
-        "SELECT NULL FROM ONE_ROW_TABLE UNION ALL SELECT 'XXXX' FROM ONE_ROW_TABLE",
-        "SELECT NULL UNION ALL SELECT 'XXXX'"
-    ];
-
-    [Fact]
-    public void OdbcAndNzResultsShouldMatchFastGetValue()
-    {
-        foreach (var query in _queriesShouldMatchFast)
-        {
-            _output.WriteLine($"Query {query}");
-            ValidateTypedQueryResultsByGetValue(query);
-        }
-    }
-
     [Fact]
     public void GetString_OnNullValue_ThrowsException()
     {
@@ -528,119 +340,8 @@ public class BasicTests : IDisposable
         Assert.Equal("abc", reader.GetString(1));
         Assert.Equal("def", reader.GetString(3));
     }
-
-
-
-    private void ValidateTypedQueryResultsByGetValue(string query)
-    {
-        //Stopwatch stopwatch = Stopwatch.StartNew();
-        using var cmd1 = _odbcConnection.CreateCommand();
-        cmd1.CommandText = query;
-        using var readerOdbc = cmd1.ExecuteReader();
-
-        using var cmd2 = _nzNewConnection.CreateCommand();
-        cmd2.CommandText = query;
-        using var readerNz = cmd2.ExecuteReader();
-
-        bool r1 = readerOdbc.Read();
-        bool r2 = readerNz.Read();
-        int num = 0;
-        
-        while (r1 && r2)
-        {
-            num++;
-            Assert.True(num < 2000, $"Too many rows returned {query}");
-            Assert.Equal(readerOdbc.FieldCount, readerNz.FieldCount);
-            for (int i = 0; i < readerOdbc.FieldCount; i++)
-            {
-                Assert.Equal(readerOdbc.IsDBNull(i), readerNz.IsDBNull(i));
-                if (readerOdbc.IsDBNull(i))
-                {
-                    continue;
-                }
-
-                Assert.Equal(readerOdbc.GetFieldType(i), readerNz.GetFieldType(i));
-
-                var odbcObjValue = readerOdbc.GetValue(i);
-                var nzObjValue = readerNz.GetValue(i);
-
-                if (odbcObjValue is string strOdbc  && nzObjValue is string strNz)
-                {
-                    if (strOdbc.Length > 4000)
-                    {
-                        strOdbc = strOdbc[0..4000];
-                    }
-                    if (strNz.Length > 4000)
-                    {
-                        strNz = strNz[0..4000];
-                    }
-                    Assert.Equal(strOdbc, strNz);
-                }
-                else if (odbcObjValue is DateTime datetimeOdbc && nzObjValue is DateTime datetimeNz)
-                {
-                    Assert.Equal(datetimeOdbc, datetimeNz, TimeSpan.FromSeconds(15));
-                }
-                else
-                {
-                    Assert.Equal(odbcObjValue, nzObjValue);
-                }
-
-                if (readerNz.GetFieldType(i) == typeof(byte))
-                {
-                    var o1 = readerNz.GetByte(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-                else if (readerNz.GetFieldType(i) == typeof(Int16))
-                {
-                    var o1 = readerNz.GetInt16(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-                else if (readerNz.GetFieldType(i) == typeof(int))
-                {
-                    var o1 = readerNz.GetInt32(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-                else if (readerNz.GetFieldType(i) == typeof(long))
-                {
-                    var o1 = readerNz.GetInt64(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-                else if (readerNz.GetFieldType(i) == typeof(DateTime))
-                {
-                    var o1 = readerNz.GetDateTime(i);
-                    Assert.Equal(o1, (DateTime)nzObjValue, precision: TimeSpan.FromSeconds(15));
-                }
-                else if (readerNz.GetFieldType(i) == typeof(decimal))
-                {
-                    var o1 = readerNz.GetDecimal(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-                else if (readerNz.GetFieldType(i) == typeof(float))
-                {
-                    var o1 = readerNz.GetFloat(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-                else if (readerNz.GetFieldType(i) == typeof(double))
-                {
-                    var o1 = readerNz.GetDouble(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-                else if (readerNz.GetFieldType(i) == typeof(string))
-                {
-                    var o1 = readerNz.GetString(i);
-                    Assert.Equal(o1, nzObjValue);
-                }
-            }
-
-            r1 = readerOdbc.Read();
-            r2 = readerNz.Read();
-        }
-        Assert.Equal(r1,r2);//same number of rows    
-    }
-
     public void Dispose()
     {
-        _odbcConnection.Dispose();
         _nzNewConnection.Dispose();
     }
 

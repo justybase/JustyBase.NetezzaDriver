@@ -247,6 +247,25 @@ Sample results (net10.0, BenchmarkDotNet, Windows 11):
 
 Async overhead is negligible (~1–3% time, 0–5% allocations).
 
+## Streaming mapped rows and server diagnostics
+
+`NzCommand.ExecuteRowsAsync` maps each row while the reader is active, so callers can process large result sets without materializing them first:
+
+```csharp
+await using var command = connection.CreateCommand("SELECT ID, NAME FROM MY_TABLE");
+await foreach (var item in command.ExecuteRowsAsync(
+    reader => new Item(reader.GetInt64(0), reader.GetString(1)), cancellationToken))
+{
+    await ProcessAsync(item, cancellationToken);
+}
+```
+
+The mapper is synchronous and the returned `IAsyncEnumerable<T>` streams rows; cancellation is passed to database reads, and disposing the enumeration closes the reader. `command.Notices` contains the notices from that command's most recent execution. The existing connection-wide `NoticeReceived` event remains available.
+
+For server failures, `NetezzaException.Message` contains the primary backend message. `SqlState`, `Severity`, `Detail`, and `Hint` expose structured fields when supplied. `RawResponse` keeps the complete decoded backend payload, and `Diagnostics` provides all fields by protocol code, including fields unknown to this driver.
+
+The runnable [examples project](src/examples/JustyBase.NetezzaDriver.Examples) includes mapped streaming in its async example and server diagnostic fields in its error-handling example.
+
 ## Testing
 
 ```bash

@@ -1,7 +1,9 @@
 ﻿using JustyBase.NetezzaDriver.StringPool;
+using System.Collections.ObjectModel;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 
 namespace JustyBase.NetezzaDriver;
 
@@ -15,6 +17,16 @@ public sealed class NzCommand : DbCommand
     }
 
     private RowValue[] _row = null!;
+    private readonly List<string> _notices = [];
+    private readonly ReadOnlyCollection<string> _noticesView;
+
+    /// <summary>
+    /// Notices returned during the most recent execution of this command.
+    /// </summary>
+    public IReadOnlyList<string> Notices => _noticesView;
+
+    internal void AddNotice(string notice) => _notices.Add(notice);
+
     public void AddRow(RowValue[] row)
     {
         _row = row;
@@ -26,11 +38,13 @@ public sealed class NzCommand : DbCommand
 
     public NzCommand(NzConnection connection)
     {
+        _noticesView = _notices.AsReadOnly();
         _connection = connection;
         connection.SetNzCommand(this);
     }
     public NzCommand(string sql, NzConnection connection)
     {
+        _noticesView = _notices.AsReadOnly();
         _connection = connection;
         CommandText = sql;
     }
@@ -202,6 +216,7 @@ public sealed class NzCommand : DbCommand
         _prevReader = null!;
         NewPreparedStatement = null;
         _recordsAffected = -1;
+        _notices.Clear();
     }
 
     public override void Cancel()
@@ -306,9 +321,29 @@ public sealed class NzCommand : DbCommand
         return null;
     }
 
+    /// <summary>
+    /// Executes the command and maps each row as it is read, without buffering
+    /// the full result set in memory.
+    /// </summary>
+    public async IAsyncEnumerable<T> ExecuteRowsAsync<T>(
+        Func<DbDataReader, T> map,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(map);
+
+        await using var reader = await ExecuteDbDataReaderAsync(
+            CommandBehavior.Default,
+            cancellationToken).ConfigureAwait(false);
+
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return map(reader);
+        }
+    }
+
     public override void Prepare()
     {
         // no-op: server-side prepared statements are not exposed via ADO.NET parameters
     }
 }
-

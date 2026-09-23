@@ -65,6 +65,50 @@ public class AsyncTests
     }
 
     [Fact]
+    public async Task ExecuteRowsAsync_ShouldMapRowsIncrementallyAndCloseReaderOnEarlyExit()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
+        await connection.OpenAsync(ct);
+        await using var command = connection.CreateCommand("SELECT 1 AS VALUE UNION ALL SELECT 2 UNION ALL SELECT 3");
+
+        List<int> values = [];
+        await foreach (int value in command.ExecuteRowsAsync(reader => reader.GetInt32(0), ct))
+        {
+            values.Add(value);
+        }
+
+        Assert.Equal([1, 2, 3], values);
+
+        await foreach (int _ in command.ExecuteRowsAsync(reader => reader.GetInt32(0), ct))
+        {
+            break;
+        }
+
+        await using var followUp = connection.CreateCommand("SELECT 42 AS VALUE");
+        Assert.Equal(42, await followUp.ExecuteScalarAsync(ct));
+    }
+
+    [Fact]
+    public async Task ExecuteRowsAsync_ShouldDisposeReaderWhenMapperThrows()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
+        await connection.OpenAsync(ct);
+        await using var command = connection.CreateCommand("SELECT 1 AS VALUE UNION ALL SELECT 2");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (int _ in command.ExecuteRowsAsync<int>(_ => throw new InvalidOperationException("mapping failed"), ct))
+            {
+            }
+        });
+
+        await using var followUp = connection.CreateCommand("SELECT 42 AS VALUE");
+        Assert.Equal(42, await followUp.ExecuteScalarAsync(ct));
+    }
+
+    [Fact]
     public async Task Reader_GetBytesAndGetChars_ShouldWorkForTextValues()
     {
         var ct = TestContext.Current.CancellationToken;
