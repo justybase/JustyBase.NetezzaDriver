@@ -7,17 +7,12 @@ namespace JustyBase.NetezzaDriver.Tests;
 [Trait("Category", "Integration")]
 public class SslTest
 {
-    private readonly ITestOutputHelper _output;
-    public SslTest(ITestOutputHelper output)
-    {
-        _output = output;
-    }
     [Fact]
     public void BasicTests()
     {
+        using var untrustedCertificate = TemporaryCertificateFile.Create();
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName,
-            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"C:\DEV\DEV\Others\keys\server-cert.pem");
-        //this cert file is invalid
+            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: untrustedCertificate.Path);
         Assert.Throws<AuthenticationException>(() =>
         {
             connection.Open();
@@ -28,8 +23,9 @@ public class SslTest
     [Fact]
     public void BasicTests2()
     {
+        using var untrustedCertificate = TemporaryCertificateFile.Create();
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName,
-            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: @"C:\DEV\DEV\Others\keys\server-cert.pem", loggerFactory: new NullLoggerFactory());
+            securityLevel: SecurityLevelCode.OnlySecuredSession, sslCerFilePath: untrustedCertificate.Path, loggerFactory: new NullLoggerFactory());
         // Logger presence must not bypass TLS certificate validation.
         Assert.Throws<AuthenticationException>(() =>
         {

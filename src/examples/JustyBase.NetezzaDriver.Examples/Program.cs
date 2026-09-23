@@ -11,9 +11,9 @@ var examples = new Dictionary<string, (string Description, Func<Task> Run)>
     ["3"] = ("Transactions (commit / rollback)",     Transactions.RunAsync),
     ["4"] = ("Connection Pooling",                   ConnectionPooling.RunAsync),
     ["5"] = ("Metadata / Catalog Introspection",     MetadataIntrospection.RunAsync),
-    ["6"] = ("Async Operations + Cancellation",      AsyncOperations.RunAsync),
+    ["6"] = ("Async Operations, Streaming + Cancellation", AsyncOperations.RunAsync),
     ["7"] = ("Timeout and Query Cancel",             TimeoutAndCancel.RunAsync),
-    ["8"] = ("Error Handling & Exception Types",     ErrorHandling.RunAsync),
+    ["8"] = ("Error Handling & Server Diagnostics",  ErrorHandling.RunAsync),
 };
 
 Console.WriteLine("JustyBase.NetezzaDriver — Examples");

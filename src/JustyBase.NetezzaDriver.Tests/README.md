@@ -62,7 +62,16 @@ dotnet test .\src\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.cs
   --filter "Category=Stress"
 ```
 
-The .NET tests use `NZ_DEV_DB` for the database name. The Node and Python
-drivers are not test dependencies and are not used as a protocol oracle;
-their existing scenarios only informed the read-only workload and boundary
-matrix.
+The .NET tests use `NZ_DEV_DB` for the database name and do not require ODBC.
+One integration test compares representative scalar result values and column
+names against `nzpy-extended` as a lightweight reference. It needs Python 3.12
+or newer and `nzpy-extended` installed in the selected interpreter:
+
+```bash
+python3 -m pip install nzpy-extended==0.0.1
+NZPY_EXTENDED_PYTHON=python3 dotnet test src/JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj --framework net10.0 --filter "FullyQualifiedName~NzpyExtendedResultCompatibilityTests"
+```
+
+The test opens read-only connections and compares fixed literals across
+integer, boolean, null, text, decimal, floating-point, date, timestamp, and
+time values. It does not need an ODBC installation.

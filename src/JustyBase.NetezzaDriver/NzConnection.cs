@@ -16,6 +16,7 @@ namespace JustyBase.NetezzaDriver;
 public sealed class NzConnection : DbConnection
 {
     private string? _error;
+    private NetezzaException? _backendException;
  
     private int _commandNumber = -1;
 
@@ -971,6 +972,7 @@ public sealed class NzConnection : DbConnection
     {
         ThrowIfProtocolFaulted();
         _error = null;
+        _backendException = null;
         nzCommand._recordsAffected = -1;
         nzCommand.NewPreparedStatement = new PreparedStatement();
         nzCommand.NewPreparedStatement.Sql = query;
@@ -1020,6 +1022,7 @@ public sealed class NzConnection : DbConnection
     {
         ThrowIfProtocolFaulted();
         _error = null;
+        _backendException = null;
         nzCommand._recordsAffected = -1;
         nzCommand.NewPreparedStatement = new PreparedStatement();
         nzCommand.NewPreparedStatement.Sql = query;
@@ -1128,14 +1131,20 @@ public sealed class NzConnection : DbConnection
     public delegate void NzNoticeEventHandler(object sender, NzNoticeEventArgs e);
     public event NzNoticeEventHandler? NoticeReceived;
 
-    private void OnNoticeReceived(string notice)
+    private void OnNoticeReceived(string notice, NzCommand nzCommand)
     {
         if (notice.StartsWith("NOTICE:"))
         {
             notice = notice["NOTICE:".Length..];
         }
         notice = notice.Trim().TrimEnd('\x00');
+        nzCommand.AddNotice(notice);
         NoticeReceived?.Invoke(this, new NzNoticeEventArgs(notice));
+    }
+
+    private NetezzaException CreateCurrentException()
+    {
+        return _backendException ?? new NetezzaException(_error ?? "Netezza backend returned an unspecified error.");
     }
 
     private TimeSpan _defaultCommandTimeout = TimeSpan.FromSeconds(60);
@@ -1262,7 +1271,7 @@ public sealed class NzConnection : DbConnection
 
         if (_error != null)
         {
-            throw new NetezzaException(_error);
+            throw CreateCurrentException();
         }
 
         return response;
@@ -1284,7 +1293,7 @@ public sealed class NzConnection : DbConnection
 
             if (_error != null)
             {
-                throw new NetezzaException(_error);
+                throw CreateCurrentException();
             }
 
             return response;
@@ -1293,6 +1302,7 @@ public sealed class NzConnection : DbConnection
         {
             CancelQuery();
             _error = "Command timeout";
+            _backendException = null;
             throw new NetezzaException(_error);
         }
     }
@@ -1305,7 +1315,7 @@ public sealed class NzConnection : DbConnection
         var rdr =  new NzDataReader(nzCommand);
         if (_error != null)
         {
-            throw new NetezzaException(_error);
+            throw CreateCurrentException();
         }
         return rdr;
     }
@@ -1323,7 +1333,7 @@ public sealed class NzConnection : DbConnection
             var rdr = await NzDataReader.CreateAsync(nzCommand, effectiveCancellationToken).ConfigureAwait(false);
             if (_error != null)
             {
-                throw new NetezzaException(_error);
+                throw CreateCurrentException();
             }
 
             return rdr;
@@ -1332,6 +1342,7 @@ public sealed class NzConnection : DbConnection
         {
             CancelQuery();
             _error = "Command timeout";
+            _backendException = null;
             throw new NetezzaException(_error);
         }
     }
@@ -1373,7 +1384,7 @@ public sealed class NzConnection : DbConnection
                 ReadNextResponseByte();
                 res = IntepretReturnedByte(nzCommand);
             }
-            throw new NetezzaException(_error);
+            throw CreateCurrentException();
         }
         return res;
     }
@@ -1394,7 +1405,7 @@ public sealed class NzConnection : DbConnection
                 await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
                 res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
             }
-            throw new NetezzaException(_error);
+            throw CreateCurrentException();
         }
         return res;
     }
@@ -1765,7 +1776,8 @@ public sealed class NzConnection : DbConnection
             int length = ReadProtocolLength("errorPayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
-            _error = Encoding.UTF8.GetString(data,0,length);
+            _backendException = new NetezzaException(BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)));
+            _error = _backendException.Message;
             _logger?.LogDebug("Response received from backend: {_error}", _error);
             //doContinue = true;
         }
@@ -1842,8 +1854,8 @@ public sealed class NzConnection : DbConnection
             int length = ReadProtocolLength("noticePayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
-            string notice = Encoding.UTF8.GetString(data[0..length]);
-            OnNoticeReceived(notice);
+            string notice = BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)).Message;
+            OnNoticeReceived(notice, nzCommand);
             _logger?.LogDebug("Response received from backend: {Notice}", notice);
         }
         else if (_lastResponse == (byte)'I')
@@ -1852,7 +1864,7 @@ public sealed class NzConnection : DbConnection
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
             string notice = Encoding.UTF8.GetString(data[0..length]);
-            OnNoticeReceived(notice);
+            OnNoticeReceived(notice, nzCommand);
             _logger?.LogDebug("Response received from backend: {Notice}", notice);
             nzCommand.AddRow([]);
         }
@@ -1911,7 +1923,8 @@ public sealed class NzConnection : DbConnection
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
-            _error = Encoding.UTF8.GetString(data, 0, length);
+            _backendException = new NetezzaException(BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)));
+            _error = _backendException.Message;
             _logger?.LogDebug("Response received from backend: {_error}", _error);
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescription)
@@ -1993,8 +2006,8 @@ public sealed class NzConnection : DbConnection
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
-            string notice = Encoding.UTF8.GetString(data, 0, length);
-            OnNoticeReceived(notice);
+            string notice = BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)).Message;
+            OnNoticeReceived(notice, nzCommand);
             _logger?.LogDebug("Response received from backend: {Notice}", notice);
         }
         else if (_lastResponse == (byte)'I')
@@ -2005,7 +2018,7 @@ public sealed class NzConnection : DbConnection
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             string notice = Encoding.UTF8.GetString(data, 0, length);
-            OnNoticeReceived(notice);
+            OnNoticeReceived(notice, nzCommand);
             _logger?.LogDebug("Response received from backend: {Notice}", notice);
             nzCommand.AddRow([]);
         }
@@ -3538,10 +3551,52 @@ public sealed class NzConnection : DbConnection
 
 public sealed class NetezzaException : DbException
 {
-    public NetezzaException() : base() { }
-    public NetezzaException(string msg) : base(msg) { }
-    public NetezzaException(string msg, Exception exception) : base(msg, exception) { }
-    public NetezzaException(Exception exception) : base("", exception) { }
+    private static readonly IReadOnlyDictionary<char, string> EmptyDiagnostics =
+        new System.Collections.ObjectModel.ReadOnlyDictionary<char, string>(new Dictionary<char, string>());
+
+    public NetezzaException() : this(string.Empty) { }
+
+    public NetezzaException(string msg) : base(msg)
+    {
+        RawResponse = msg;
+        Diagnostics = EmptyDiagnostics;
+    }
+
+    public NetezzaException(string msg, Exception exception) : base(msg, exception)
+    {
+        RawResponse = msg;
+        Diagnostics = EmptyDiagnostics;
+    }
+
+    public NetezzaException(Exception exception) : this(string.Empty, exception) { }
+
+    internal NetezzaException(BackendDiagnosticResponse response) : base(response.Message)
+    {
+        RawResponse = response.RawResponse;
+        Severity = response.Severity;
+        SqlState = response.SqlState;
+        Detail = response.Detail;
+        Hint = response.Hint;
+        Diagnostics = response.Diagnostics;
+    }
+
+    /// <summary>The severity reported by Netezza, when included in the response.</summary>
+    public string? Severity { get; }
+
+    /// <summary>The five-character SQLSTATE reported by Netezza, when included.</summary>
+    public override string? SqlState { get; }
+
+    /// <summary>Additional server detail, when included in the response.</summary>
+    public string? Detail { get; }
+
+    /// <summary>A server-provided hint, when included in the response.</summary>
+    public string? Hint { get; }
+
+    /// <summary>The complete decoded backend response, including its diagnostic fields.</summary>
+    public string? RawResponse { get; }
+
+    /// <summary>All diagnostic fields supplied by the backend, keyed by protocol field code.</summary>
+    public IReadOnlyDictionary<char, string> Diagnostics { get; }
 }
 public sealed class InterfaceException : DbException
 {

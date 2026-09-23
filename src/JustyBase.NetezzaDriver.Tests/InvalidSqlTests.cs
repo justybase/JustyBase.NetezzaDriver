@@ -16,6 +16,35 @@ public class InvalidSqlTests
     }
 
     [Fact]
+    public void BackendErrorShouldExposeReadableMessageAndRawResponse()
+    {
+        using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
+        connection.Open();
+        using var command = connection.CreateCommand("SELECT 1,,2");
+
+        var exception = Assert.Throws<NetezzaException>(() => command.ExecuteReader());
+
+        Assert.False(string.IsNullOrWhiteSpace(exception.Message));
+        Assert.DoesNotContain('\0', exception.Message);
+        Assert.False(string.IsNullOrEmpty(exception.RawResponse));
+    }
+
+    [Fact]
+    public async Task BackendErrorShouldExposeReadableMessageAndRawResponseAsync()
+    {
+        await using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await using var command = connection.CreateCommand("SELECT 1,,2");
+
+        var exception = await Assert.ThrowsAsync<NetezzaException>(
+            async () => await command.ExecuteReaderAsync(TestContext.Current.CancellationToken));
+
+        Assert.False(string.IsNullOrWhiteSpace(exception.Message));
+        Assert.DoesNotContain('\0', exception.Message);
+        Assert.False(string.IsNullOrEmpty(exception.RawResponse));
+    }
+
+    [Fact]
     public void ExecuteNonQueryShouldThrow()
     {
         using NzConnection connection = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName);
