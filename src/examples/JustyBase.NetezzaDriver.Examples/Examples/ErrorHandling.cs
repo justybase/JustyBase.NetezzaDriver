@@ -18,6 +18,7 @@ public static class ErrorHandling
         catch (NetezzaException ex)
         {
             Console.WriteLine($"  NetezzaException: {ex.Message}");
+            PrintDiagnostics(ex);
         }
 
         // ── Missing table ──
@@ -30,6 +31,7 @@ public static class ErrorHandling
         catch (NetezzaException ex)
         {
             Console.WriteLine($"  NetezzaException: {ex.Message}");
+            PrintDiagnostics(ex);
         }
 
         // ── DBNull handling ──
@@ -69,5 +71,17 @@ public static class ErrorHandling
         }
 
         Console.WriteLine("ErrorHandling completed.");
+    }
+
+    private static void PrintDiagnostics(NetezzaException exception)
+    {
+        if (exception.SqlState is not null)
+            Console.WriteLine($"  SQLSTATE: {exception.SqlState}");
+        if (exception.Severity is not null)
+            Console.WriteLine($"  Severity: {exception.Severity}");
+        if (exception.Detail is not null)
+            Console.WriteLine($"  Detail: {exception.Detail}");
+        if (exception.Hint is not null)
+            Console.WriteLine($"  Hint: {exception.Hint}");
     }
 }

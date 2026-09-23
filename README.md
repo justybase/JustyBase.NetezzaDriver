@@ -264,6 +264,8 @@ The mapper is synchronous and the returned `IAsyncEnumerable<T>` streams rows; c
 
 For server failures, `NetezzaException.Message` contains the primary backend message. `SqlState`, `Severity`, `Detail`, and `Hint` expose structured fields when supplied. `RawResponse` keeps the complete decoded backend payload, and `Diagnostics` provides all fields by protocol code, including fields unknown to this driver.
 
+The runnable [examples project](src/examples/JustyBase.NetezzaDriver.Examples) includes mapped streaming in its async example and server diagnostic fields in its error-handling example.
+
 ## Testing
 
 ```bash

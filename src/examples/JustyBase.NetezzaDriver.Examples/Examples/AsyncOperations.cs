@@ -17,6 +17,18 @@ public static class AsyncOperations
             Console.WriteLine($"  Result: {reader.GetInt32(0)}");
         }
 
+        // ── Stream mapped rows without buffering the complete result ──
+        Console.WriteLine("\nMapped row streaming:");
+        await using var streamConnection = await ConnectionHelper.OpenAsync();
+        await using var streamCommand = streamConnection.CreateCommand(
+            "SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3");
+        await foreach (int value in streamCommand.ExecuteRowsAsync(
+            row => row.GetInt32(0),
+            cts.Token))
+        {
+            Console.WriteLine($"  Streamed: {value}");
+        }
+
         // ── Concurrent async queries ──
         Console.WriteLine("\nConcurrent async queries:");
         var queries = new[] {
