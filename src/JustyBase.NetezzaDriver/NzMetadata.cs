@@ -3,7 +3,7 @@ using System.Data.Common;
 
 namespace JustyBase.NetezzaDriver;
 
-public sealed class NzMetadata
+public sealed partial class NzMetadata
 {
     private readonly NzConnection _connection;
 

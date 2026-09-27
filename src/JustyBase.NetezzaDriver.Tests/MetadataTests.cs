@@ -101,4 +101,19 @@ public class MetadataTests : IDisposable
         var keys = await meta.GetDistributionKeyAsync("DIMDATE", "ADMIN");
         Assert.NotNull(keys);
     }
+
+    [Fact]
+    public async Task ExtendedMetadata_ReconstructsExistingTable()
+    {
+        var meta = _conn.Meta;
+        Assert.False(string.IsNullOrWhiteSpace(await meta.GetCurrentDatabaseAsync()));
+        var columns = await meta.GetDetailedColumnsAsync("DIMDATE", "ADMIN");
+        Assert.NotEmpty(columns);
+        var ddl = await meta.GetTableDdlAsync("DIMDATE", "ADMIN");
+        Assert.Contains("CREATE TABLE", ddl);
+        Assert.Contains("DIMDATE", ddl);
+        var batch = await meta.GetTablesDdlAsync("ADMIN", tables: ["DIMDATE"]);
+        Assert.Single(batch);
+        Assert.Null(batch[0].Error);
+    }
 }

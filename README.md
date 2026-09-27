@@ -176,7 +176,15 @@ var distKey   = await meta.GetDistributionKeyAsync("DIMDATE", "ADMIN");
 var sizes     = await meta.GetTableSizesAsync();
 var sessions  = await meta.GetSessionsAsync();
 var search    = await meta.SearchObjectsAsync("DIM%");
+var tableDdl  = await meta.GetTableDdlAsync("DIMDATE", "ADMIN");
 ```
+
+Additional methods cover current database and schema, sequences, users, groups,
+query history, detailed columns, organize keys, table keys, comments and owners.
+GetTableDdlAsync, GetViewDdlAsync, GetProcedureDdlAsync,
+GetExternalTableDdlAsync and GetSynonymDdlAsync reconstruct SQL. Batch methods
+return a result or error for each requested table, view or procedure. Supply a
+signature for an overloaded procedure.
 
 See [docs/metadata_api.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/metadata_api.md) for full API reference.
 
