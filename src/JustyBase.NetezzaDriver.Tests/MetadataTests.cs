@@ -116,4 +116,54 @@ public class MetadataTests : IDisposable
         Assert.Single(batch);
         Assert.Null(batch[0].Error);
     }
+
+    [Fact]
+    public async Task DdlHelpers_RoundTripAllCatalogObjectKinds()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+        var table = "JB_DDL_T_" + suffix;
+        var view = "JB_DDL_V_" + suffix;
+        var procedure = "JB_DDL_P_" + suffix;
+        var synonym = "JB_DDL_S_" + suffix;
+        var external = "JB_DDL_E_" + suffix;
+        void Execute(string sql)
+        {
+            using var command = _conn.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
+        void Cleanup()
+        {
+            foreach (var sql in new[]
+            {
+                $"DROP VIEW {view}", $"DROP PROCEDURE {procedure}()", $"DROP SYNONYM {synonym}",
+                $"DROP TABLE {external}", $"DROP TABLE {table}"
+            })
+            {
+                try { Execute(sql); } catch { /* unique test object may not exist */ }
+            }
+        }
+
+        Cleanup();
+        try
+        {
+            Execute($"CREATE TABLE {table}(\"SELECT\" INTEGER) DISTRIBUTE ON (\"SELECT\")");
+            Execute($"CREATE VIEW {view} AS SELECT \"SELECT\" FROM {table}");
+            Execute($"CREATE OR REPLACE PROCEDURE {procedure}() RETURNS INTEGER EXECUTE AS OWNER LANGUAGE NZPLSQL AS BEGIN_PROC BEGIN RETURN 1; END; END_PROC;");
+            Execute($"COMMENT ON PROCEDURE {procedure}() IS 'DDL round-trip comment'");
+            Execute($"CREATE SYNONYM {synonym} FOR {table}");
+            Execute($"COMMENT ON SYNONYM {synonym} IS 'DDL round-trip comment'");
+            Execute($"CREATE EXTERNAL TABLE {external}(ID INTEGER, LABEL CHAR(10), EVENT_DATE DATE) USING (DATAOBJECT('/tmp/{external}.csv') FORMAT 'FIXED' RECORDLENGTH 24 RECORDDELIM '\r\n' LAYOUT (BYTES 4, BYTES 10, DATE YMD ' ' BYTES 10))");
+
+            var meta = _conn.Meta;
+            var tableDdl = await meta.GetTableDdlAsync(table, "ADMIN");
+            var viewDdl = await meta.GetViewDdlAsync(view, "ADMIN");
+            var procedureDdl = await meta.GetProcedureDdlAsync(procedure, "ADMIN");
+            var synonymDdl = await meta.GetSynonymDdlAsync(synonym, "ADMIN");
+            var externalDdl = await meta.GetExternalTableDdlAsync(external, "ADMIN");
+            Cleanup();
+            foreach (var ddl in new[] { tableDdl, viewDdl, procedureDdl, synonymDdl, externalDdl }) Execute(ddl);
+        }
+        finally { Cleanup(); }
+    }
 }
