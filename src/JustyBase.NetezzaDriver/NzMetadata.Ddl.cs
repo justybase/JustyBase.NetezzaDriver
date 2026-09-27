@@ -31,8 +31,7 @@ public sealed partial class NzMetadata
         if (string.IsNullOrWhiteSpace(selected.Definition))
             throw new ArgumentException($"View {selected.Schema}.{view} has no definition");
         database ??= await GetCurrentDatabaseAsync().ConfigureAwait(false) ?? "UNKNOWN";
-        var body = selected.Definition.Trim().TrimEnd(';').TrimEnd();
-        return $"CREATE OR REPLACE VIEW {Qualified(database, selected.Schema, view)} AS\n{body};";
+        return $"CREATE OR REPLACE VIEW {Qualified(database, selected.Schema, view)} AS\n{selected.Definition}";
     }
 
     public async Task<string> GetProcedureDdlAsync(string procedure, string? schema = null, string? database = null)
@@ -63,7 +62,13 @@ public sealed partial class NzMetadata
             "LANGUAGE NZPLSQL AS", "BEGIN_PROC", selected.Source ?? "", "END_PROC;"
         };
         if (!string.IsNullOrEmpty(selected.Description))
-            lines.Add($"COMMENT ON PROCEDURE {name} IS '{EscapeSqlString(selected.Description)}';");
+        {
+            var signatureOpen = selected.Signature?.IndexOf('(') ?? -1;
+            if (signatureOpen < 0)
+                throw new ArgumentException($"Procedure {selected.Name} has a comment but no signature");
+            var commentSignature = selected.Signature![signatureOpen..];
+            lines.Add($"COMMENT ON PROCEDURE {name}{commentSignature} IS '{EscapeSqlString(selected.Description)}';");
+        }
         return string.Join("\n", lines);
     }
 
@@ -210,6 +215,27 @@ public sealed partial class NzMetadata
                 .Select(index => r.IsDBNull(index + 3) ? null : r.GetValue(index + 3)).ToArray())).ConfigureAwait(false);
         RequireUniqueSchema(rows.Select(row => row.Schema), table);
         var selected = rows.FirstOrDefault() ?? throw new ArgumentException($"External table {table} not found");
+        var layoutIndex = Array.FindIndex(ExternalOptions, option => option.Keyword == "LAYOUT");
+        var catalogLayout = selected.Options[layoutIndex];
+        var catalogLayoutText = Convert.ToString(catalogLayout, System.Globalization.CultureInfo.InvariantCulture)?.Trim() ?? "";
+        if (int.TryParse(catalogLayoutText, out var zoneCount))
+        {
+            selected.Options[layoutIndex] = null;
+            if (zoneCount > 0)
+            {
+                var zoneSql = "SELECT Z.USETYPE, Z.NAME, Z.TYPE, Z.STYLE, Z.LENGTH, Z.DELIMITER, Z.AROUND, Z.NULLIF, Z.ENDIAN, Z.ALIGNMENT, Z.MODULUS"
+                    + " FROM _v_external E JOIN _v_extzones Z ON E.RELID = Z.RELID"
+                    + $" WHERE E.SCHEMA = {SqlStringLiteral(selected.Schema)}"
+                    + $" AND E.TABLENAME = {SqlStringLiteral(table)} ORDER BY Z.ZONEID";
+                var zones = await ExecuteQueryAsync(zoneSql, r => new ExternalLayoutZone(
+                    Text(r, 0) ?? "", Text(r, 1) ?? "", Text(r, 2) ?? "", Text(r, 3) ?? "",
+                    Text(r, 4) ?? "", Text(r, 5) ?? "", Text(r, 6) ?? "", Text(r, 7) ?? "",
+                    Text(r, 8) ?? "", Text(r, 9) ?? "", Text(r, 10) ?? "")).ConfigureAwait(false);
+                if (zones.Count != zoneCount)
+                    throw new InvalidOperationException($"Cannot reconstruct external table LAYOUT: catalog reports {zoneCount} zones, but _V_EXTZONES returned {zones.Count}");
+                selected.Options[layoutIndex] = FormatExternalLayoutZones(zones);
+            }
+        }
         database ??= await GetCurrentDatabaseAsync().ConfigureAwait(false) ?? "UNKNOWN";
         var columnSql = "SELECT C.ATTNAME, C.FORMAT_TYPE, C.ATTNOTNULL"
             + " FROM _v_relation_column C JOIN _v_external E ON C.OBJID = E.RELID"
@@ -237,8 +263,11 @@ public sealed partial class NzMetadata
             {
                 ExternalKind.String => $"'{EscapeSqlString(Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "")}'",
                 ExternalKind.Boolean => BooleanValue(value) ? "true" : "false",
+                ExternalKind.Compression => BooleanValue(value) ? "true" : IsFalseValue(value) ? "false" : Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? "",
+                ExternalKind.Layout => FormatExternalLayout(value),
                 _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? ""
             };
+            if (option.Kind == ExternalKind.Layout && rendered.Length == 0) continue;
             lines.Add($"    {option.Keyword} {rendered}");
         }
         lines.Add(");");
@@ -258,14 +287,17 @@ public sealed partial class NzMetadata
         RequireUniqueSchema(rows.Select(row => row.Schema), synonym);
         var selected = rows.FirstOrDefault() ?? throw new ArgumentException($"Synonym {synonym} not found");
         database ??= await GetCurrentDatabaseAsync().ConfigureAwait(false) ?? "UNKNOWN";
-        var target = selected.Reference.Contains('.')
-            ? string.Join(".", selected.Reference.Split('.').Select(QuoteIdentifier))
-            : selected.RefDatabase is not null && selected.RefSchema is not null
-                ? Qualified(selected.RefDatabase, selected.RefSchema, selected.Reference)
-                : QuoteIdentifier(selected.Reference);
+        var parts = SplitIdentifierPath(selected.Reference);
+        if (parts.Count == 1 && selected.RefDatabase is not null)
+            parts.InsertRange(0, [selected.RefDatabase, selected.RefSchema ?? ""]);
+        else if (parts.Count == 1 && selected.RefSchema is not null)
+            parts.Insert(0, selected.RefSchema);
+        else if (parts.Count == 2 && selected.RefDatabase is not null)
+            parts.Insert(0, selected.RefDatabase);
+        var target = string.Join(".", parts.Select(part => part.Length == 0 ? "" : QuoteIdentifier(part)));
         var ddl = $"CREATE SYNONYM {Qualified(database, selected.Schema, synonym)} FOR {target};";
         if (selected.Description is not null)
-            ddl += $"\nCOMMENT ON SYNONYM {QuoteIdentifier(synonym)} IS '{EscapeSqlString(selected.Description)}';";
+            ddl += $"\nCOMMENT ON SYNONYM {Qualified(database, selected.Schema, synonym)} IS '{EscapeSqlString(selected.Description)}';";
         return ddl;
     }
 
@@ -273,12 +305,124 @@ public sealed partial class NzMetadata
         Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)
             ?.Trim().ToLowerInvariant() is "true" or "t" or "1" or "yes" or "on";
 
+    private static bool IsFalseValue(object value) =>
+        Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)
+            ?.Trim().ToLowerInvariant() is "false" or "f" or "0" or "no" or "off";
+
+    private static string FormatExternalLayout(object value)
+    {
+        var layout = Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture)?.Trim() ?? "";
+        if (layout.Length == 0) return "";
+        return layout.StartsWith("(", StringComparison.Ordinal) && layout.EndsWith(")", StringComparison.Ordinal)
+            ? layout
+            : "(" + layout + ")";
+    }
+
+    internal static string FormatExternalLayoutZones(IReadOnlyList<ExternalLayoutZone> zones)
+    {
+        var definitions = new List<string>(zones.Count);
+        for (var index = 0; index < zones.Count; index++)
+        {
+            var zone = zones[index];
+            var useType = zone.UseType.Trim().ToUpperInvariant();
+            if (useType.Length > 0 && useType is not ("REF" or "FILLER"))
+                throw new InvalidOperationException($"Cannot reconstruct external table LAYOUT: unsupported zone use type {useType}");
+            if (string.IsNullOrWhiteSpace(zone.Length))
+                throw new InvalidOperationException($"Cannot reconstruct external table LAYOUT: zone {index + 1} has no length");
+            foreach (var (field, value) in new[]
+            {
+                ("AROUND", zone.Around), ("ENDIAN", zone.Endian),
+                ("ALIGNMENT", zone.Alignment), ("MODULUS", zone.Modulus)
+            })
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                    throw new InvalidOperationException($"Cannot reconstruct external table LAYOUT: zone {index + 1} uses unsupported {field} metadata");
+            }
+            var parts = new List<string>();
+            if (useType.Length > 0) parts.Add(useType);
+            if (zone.Name.Length > 0) parts.Add(QuoteIdentifier(zone.Name));
+            if (!string.IsNullOrWhiteSpace(zone.Type)) parts.Add(zone.Type.Trim());
+            var style = zone.Style.Trim();
+            if (style.Length > 0) parts.Add(style);
+            if (zone.Delimiter.Length > 0)
+            {
+                if (style.Length == 0)
+                    throw new InvalidOperationException($"Cannot reconstruct external table LAYOUT: zone {index + 1} has a delimiter without a style");
+                if (!style.Contains('\'')) parts.Add($"'{EscapeSqlString(zone.Delimiter)}'");
+            }
+            parts.Add(zone.Length.Trim());
+            if (!string.IsNullOrWhiteSpace(zone.NullIf))
+            {
+                var nullIf = zone.NullIf.Trim();
+                parts.Add(nullIf.StartsWith("NULLIF", StringComparison.OrdinalIgnoreCase) ? nullIf : $"NULLIF {nullIf}");
+            }
+            definitions.Add(string.Join(" ", parts));
+        }
+        return string.Join(", ", definitions);
+    }
+
+    internal static List<string> SplitIdentifierPath(string value)
+    {
+        var rawParts = new List<string>();
+        var current = new System.Text.StringBuilder();
+        var quoted = false;
+        for (var i = 0; i < value.Length; i++)
+        {
+            var ch = value[i];
+            if (ch == '"')
+            {
+                if (quoted && i + 1 < value.Length && value[i + 1] == '"') { current.Append("\"\""); i++; }
+                else { current.Append(ch); quoted = !quoted; }
+            }
+            else if (ch == '.' && !quoted)
+            {
+                rawParts.Add(current.ToString()); current.Clear();
+            }
+            else current.Append(ch);
+        }
+        if (quoted) throw new ArgumentException($"Invalid synonym target: {value}");
+        rawParts.Add(current.ToString());
+        var parts = new List<string>(rawParts.Count);
+        foreach (var rawPart in rawParts)
+        {
+            var part = rawPart.Trim();
+            if (!part.StartsWith('"'))
+            {
+                if (part.Contains('"')) throw new ArgumentException($"Invalid synonym target: {value}");
+                parts.Add(part);
+                continue;
+            }
+            if (part.Length < 2 || !part.EndsWith('"'))
+                throw new ArgumentException($"Invalid synonym target: {value}");
+            var identifier = new System.Text.StringBuilder();
+            for (var i = 1; i < part.Length - 1; i++)
+            {
+                if (part[i] == '"')
+                {
+                    if (i + 1 >= part.Length - 1 || part[i + 1] != '"')
+                        throw new ArgumentException($"Invalid synonym target: {value}");
+                    identifier.Append('"');
+                    i++;
+                }
+                else identifier.Append(part[i]);
+            }
+            parts.Add(identifier.ToString());
+        }
+        var hasOmittedSchema = parts.Count == 3 && parts[0].Length > 0 && parts[1].Length == 0 && parts[2].Length > 0;
+        if (parts.Count > 3 || (parts.Any(part => part.Length == 0) && !hasOmittedSchema))
+            throw new ArgumentException($"Invalid synonym target: {value}");
+        return parts;
+    }
+
+    internal sealed record ExternalLayoutZone(
+        string UseType, string Name, string Type, string Style, string Length, string Delimiter,
+        string Around, string NullIf, string Endian, string Alignment, string Modulus);
     private sealed record ExternalDdlRow(string Schema, string Name, string? DataObject, object?[] Options);
     private sealed record ExternalColumn(string Name, string TypeName, bool NotNull);
     private sealed record SynonymDdlRow(
         string Schema, string? Owner, string Name, string Reference,
         string? Description, string? RefDatabase, string? RefSchema);
-    private enum ExternalKind { String, Number, Boolean }
+    private enum ExternalKind { String, Number, Boolean, Compression, Layout }
     private sealed record ExternalOption(string Keyword, string Column, ExternalKind Kind);
     private static readonly ExternalOption[] ExternalOptions =
     [
@@ -300,7 +444,7 @@ public sealed partial class NzMetadata
         new("TIMEEXTRAZEROS", "TIMEEXTRAZEROS", ExternalKind.Boolean),
         new("Y2BASE", "Y2BASE", ExternalKind.Number),
         new("FILLRECORD", "FILLRECORD", ExternalKind.Boolean),
-        new("COMPRESS", "COMPRESS", ExternalKind.Boolean),
+        new("COMPRESS", "COMPRESS", ExternalKind.Compression),
         new("INCLUDEHEADER", "INCLUDEHEADER", ExternalKind.Boolean),
         new("LFINSTRING", "LFINSTRING", ExternalKind.Boolean),
         new("DATESTYLE", "DATESTYLE", ExternalKind.String),
@@ -314,6 +458,9 @@ public sealed partial class NzMetadata
         new("REQUIREQUOTES", "REQUIREQUOTES", ExternalKind.Boolean),
         new("RECORDLENGTH", "RECORDLENGTH", ExternalKind.Number),
         new("DATETIMEDELIM", "DATETIMEDELIM", ExternalKind.String),
-        new("REJECTFILE", "REJECTFILE", ExternalKind.String)
+        new("REJECTFILE", "REJECTFILE", ExternalKind.String),
+        new("LAYOUT", "LAYOUT", ExternalKind.Layout),
+        new("INCLUDEZEROSECONDS", "INCLUDEZEROSECONDS", ExternalKind.Boolean),
+        new("MERIDIANDELIM", "MERIDIANDELIM", ExternalKind.String)
     ];
 }
