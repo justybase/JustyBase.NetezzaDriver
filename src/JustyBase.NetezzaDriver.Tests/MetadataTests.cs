@@ -149,6 +149,8 @@ public class MetadataTests : IDisposable
         {
             Execute($"CREATE TABLE {table}(\"SELECT\" INTEGER) DISTRIBUTE ON (\"SELECT\")");
             Execute($"CREATE VIEW {view} AS SELECT \"SELECT\" FROM {table}");
+            Execute($"COMMENT ON VIEW {view} IS 'DDL round-trip view comment'");
+            Execute($"COMMENT ON COLUMN {view}.\"SELECT\" IS 'DDL round-trip view column comment'");
             Execute($"CREATE OR REPLACE PROCEDURE {procedure}() RETURNS INTEGER EXECUTE AS OWNER LANGUAGE NZPLSQL AS BEGIN_PROC BEGIN RETURN 1; END; END_PROC;");
             Execute($"COMMENT ON PROCEDURE {procedure}() IS 'DDL round-trip comment'");
             Execute($"CREATE SYNONYM {synonym} FOR {table}");
@@ -158,6 +160,12 @@ public class MetadataTests : IDisposable
             var meta = _conn.Meta;
             var tableDdl = await meta.GetTableDdlAsync(table, "ADMIN");
             var viewDdl = await meta.GetViewDdlAsync(view, "ADMIN");
+            Assert.Contains("DDL round-trip view comment", viewDdl);
+            Assert.Contains("DDL round-trip view column comment", viewDdl);
+            var viewBatch = await meta.GetViewsDdlAsync("ADMIN", views: [view]);
+            Assert.Single(viewBatch);
+            Assert.Contains("DDL round-trip view comment", viewBatch[0].Ddl);
+            Assert.Contains("DDL round-trip view column comment", viewBatch[0].Ddl);
             var procedureDdl = await meta.GetProcedureDdlAsync(procedure, "ADMIN");
             var synonymDdl = await meta.GetSynonymDdlAsync(synonym, "ADMIN");
             var externalDdl = await meta.GetExternalTableDdlAsync(external, "ADMIN");
