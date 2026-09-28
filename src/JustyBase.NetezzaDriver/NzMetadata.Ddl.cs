@@ -31,7 +31,27 @@ public sealed partial class NzMetadata
         if (string.IsNullOrWhiteSpace(selected.Definition))
             throw new ArgumentException($"View {selected.Schema}.{view} has no definition");
         database ??= await GetCurrentDatabaseAsync().ConfigureAwait(false) ?? "UNKNOWN";
-        return $"CREATE OR REPLACE VIEW {Qualified(database, selected.Schema, view)} AS\n{selected.Definition}";
+        var quotedView = QuoteIdentifier(view);
+        var quotedSchema = QuoteIdentifier(selected.Schema);
+        var columns = await GetDetailedColumnsAsync(quotedView, quotedSchema).ConfigureAwait(false);
+        var comment = await GetTableCommentAsync(quotedView, quotedSchema).ConfigureAwait(false);
+        var name = Qualified(database, selected.Schema, view);
+        var lines = new List<string>
+        {
+            $"CREATE OR REPLACE VIEW {name} AS",
+            selected.Definition
+        };
+        if (!string.IsNullOrWhiteSpace(comment))
+        {
+            lines.Add("");
+            lines.Add($"COMMENT ON VIEW {name} IS '{EscapeSqlString(comment.Trim())}';");
+        }
+        foreach (var column in columns)
+        {
+            if (!string.IsNullOrWhiteSpace(column.Description))
+                lines.Add($"COMMENT ON COLUMN {name}.{QuoteIdentifier(column.Name)} IS '{EscapeSqlString(column.Description.Trim())}';");
+        }
+        return string.Join("\n", lines);
     }
 
     public async Task<string> GetProcedureDdlAsync(string procedure, string? schema = null, string? database = null)
