@@ -46,6 +46,9 @@ public struct RowValue
     public string stringValue;
     [FieldOffset(0)]
     public object objectValue;
+
+    internal void ResetForReuse() => this = default;
+
     public readonly object GetValue() => typeCode switch
     {
         TypeCodeEx.Empty or TypeCodeEx.DBNull => DBNull.Value,

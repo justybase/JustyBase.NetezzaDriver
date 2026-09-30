@@ -45,3 +45,28 @@ can be rerun with:
 dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net10.0 -- \
   --filter '*FieldAccessBench*' --runtimes net10.0 --iterationCount 3 --warmupCount 1
 ```
+
+### Varying-field offset decoding
+
+`VariableFieldOffsetBench` compares the former repeated prefix walk with the
+one-pass offset table on synthetic DBOS rows. This isolates the offset work;
+it does not represent end-to-end database throughput. A .NET 10 NativeAOT
+ShortRun on an AMD Ryzen 7 7840HS measured:
+
+| Varying fields | Repeated scan | Precomputed offsets | Ratio |
+|---------------:|--------------:|--------------------:|------:|
+| 8 | 21.29 ns | 15.44 ns | 0.73x |
+| 64 | 2.854 us | 154.86 ns | 0.05x |
+| 256 | 58.36 us | 657.50 ns | 0.01x |
+
+The benchmark ran three measured iterations per case with no managed
+allocations in either method. The sample supports linear scaling for offset
+calculation; validate end-to-end impact with the live reader benchmarks for a
+representative schema.
+
+Run it with:
+
+```bash
+dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net10.0 -- \
+  --filter '*VariableFieldOffsetBench*'
+```

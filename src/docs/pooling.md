@@ -59,7 +59,8 @@ var builder = new NzConnectionStringBuilder
     MinPoolSize = 2,
     MaxPoolSize = 20,
     ConnectionIdleTimeout = 60,
-    ConnectionLifetime = 300
+    ConnectionLifetime = 300,
+    ConnectionValidationInterval = 60
 };
 
 var pool = new NzConnectionPool(builder);
@@ -73,6 +74,7 @@ var pool = new NzConnectionPool(builder);
 | `maxPoolSize` | `10` | Maximum number of connections allowed in the pool |
 | `connectionIdleTimeoutSeconds` | `30` | Seconds before an idle connection is closed |
 | `connectionLifetimeSeconds` | `0` | Max lifetime in seconds (0 = unlimited) |
+| `ConnectionValidationInterval` | `0` | Probe idle connections after this many idle seconds; 0 validates every checkout |
 
 Properties available at runtime:
 
@@ -114,5 +116,5 @@ When a connection is returned to the pool, if it has an open transaction (`InTra
 
 ## Performance notes
 
-- Pool validation (`SELECT 1`) runs synchronously during `RentAsync`. For low-latency requirements, consider the trade-off between validation overhead and catching dead connections.
+- Pool validation uses an asynchronous `SELECT 1` probe when a connection is checked. The default interval `0` preserves validation on every checkout. Set a positive `ConnectionValidationInterval` on the builder to skip the probe for recently returned connections; disconnected connections may then be discovered on the next command.
 - The maintenance timer runs every 30 seconds on a thread-pool thread.

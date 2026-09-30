@@ -18,19 +18,32 @@ public sealed class NzConnectionPool : IAsyncDisposable
     private readonly int _maxPoolSize;
     private readonly TimeSpan _idleTimeout;
     private readonly TimeSpan _maxLifetime;
+    private readonly TimeSpan _validationInterval;
     private readonly SemaphoreSlim _semaphore;
     private readonly SemaphoreSlim _idleLock = new(1, 1);
     private readonly ConcurrentQueue<IdleConnection> _idle = new();
     private readonly ConcurrentDictionary<int, NzConnection> _active = new();
     private readonly CancellationTokenSource _disposeCts = new();
     private int _totalConnections;
+    private long _connectionValidationCount;
     private bool _disposed;
     private readonly Task _maintenanceTask;
 
     public NzConnectionPool(string host, string database, string user, string password,
         int port = 5480, int minPoolSize = 0, int maxPoolSize = 10,
         int connectionIdleTimeoutSeconds = 30, int connectionLifetimeSeconds = 0)
+        : this(host, database, user, password, port, minPoolSize, maxPoolSize,
+              connectionIdleTimeoutSeconds, connectionLifetimeSeconds, 0)
     {
+    }
+
+    private NzConnectionPool(string host, string database, string user, string password,
+        int port, int minPoolSize, int maxPoolSize, int connectionIdleTimeoutSeconds,
+        int connectionLifetimeSeconds, int connectionValidationIntervalSeconds)
+    {
+        if (connectionValidationIntervalSeconds < 0)
+            throw new ArgumentOutOfRangeException(nameof(connectionValidationIntervalSeconds));
+
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _database = database ?? throw new ArgumentNullException(nameof(database));
         _user = user ?? throw new ArgumentNullException(nameof(user));
@@ -40,6 +53,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
         _maxPoolSize = maxPoolSize > 0 ? maxPoolSize : 10;
         _idleTimeout = TimeSpan.FromSeconds(connectionIdleTimeoutSeconds > 0 ? connectionIdleTimeoutSeconds : 30);
         _maxLifetime = connectionLifetimeSeconds > 0 ? TimeSpan.FromSeconds(connectionLifetimeSeconds) : TimeSpan.MaxValue;
+        _validationInterval = TimeSpan.FromSeconds(connectionValidationIntervalSeconds);
         _semaphore = new SemaphoreSlim(_maxPoolSize, _maxPoolSize);
         _maintenanceTask = Task.Run(() => RunMaintenanceLoopAsync(_disposeCts.Token));
     }
@@ -47,13 +61,23 @@ public sealed class NzConnectionPool : IAsyncDisposable
     public NzConnectionPool(NzConnectionStringBuilder builder)
         : this(builder.Host, builder.Database, builder.UserName, builder.Password,
               builder.Port, builder.MinPoolSize, builder.MaxPoolSize,
-              builder.ConnectionIdleTimeout, builder.ConnectionLifetime)
+              builder.ConnectionIdleTimeout, builder.ConnectionLifetime,
+              builder.ConnectionValidationInterval)
     {
     }
 
     public int ActiveCount => _active.Count;
     public int IdleCount => _idle.Count;
     public int MaxPoolSize => _maxPoolSize;
+    internal long ConnectionValidationCount => Interlocked.Read(ref _connectionValidationCount);
+
+    internal bool ShouldValidateIdleConnection(DateTime returnedAtUtc, DateTime nowUtc)
+        => _validationInterval == TimeSpan.Zero || nowUtc - returnedAtUtc >= _validationInterval;
+
+    internal bool ShouldValidateIdleConnection(NzConnection connection, DateTime returnedAtUtc, DateTime nowUtc)
+        => connection.State != System.Data.ConnectionState.Open
+            || IsConnectionExpired(connection)
+            || ShouldValidateIdleConnection(returnedAtUtc, nowUtc);
 
     public async Task<PooledNzConnection> RentAsync(CancellationToken cancellationToken = default)
     {
@@ -78,7 +102,20 @@ public sealed class NzConnectionPool : IAsyncDisposable
                 }
 
                 var candidate = idleEntry.Connection;
-                if (IsConnectionValid(candidate))
+                bool needsValidation = ShouldValidateIdleConnection(candidate, idleEntry.ReturnedAtUtc, DateTime.UtcNow);
+                bool isValid;
+                try
+                {
+                    isValid = !needsValidation || await IsConnectionValidAsync(candidate, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    await DisposeConnectionAsync(candidate).ConfigureAwait(false);
+                    Interlocked.Decrement(ref _totalConnections);
+                    throw;
+                }
+
+                if (isValid)
                 {
                     var pid = candidate.Pid;
                     _active.TryAdd(pid, candidate);
@@ -149,20 +186,23 @@ public sealed class NzConnectionPool : IAsyncDisposable
         return connection;
     }
 
-    private bool IsConnectionValid(NzConnection connection)
+    private async Task<bool> IsConnectionValidAsync(NzConnection connection, CancellationToken cancellationToken)
     {
-        if (connection.State != System.Data.ConnectionState.Open)
-            return false;
-        if (IsConnectionExpired(connection))
+        if (connection.State != System.Data.ConnectionState.Open || IsConnectionExpired(connection))
             return false;
 
+        Interlocked.Increment(ref _connectionValidationCount);
         try
         {
-            using var cmd = connection.CreateCommand();
+            await using var cmd = connection.CreateCommand();
             cmd.CommandText = "SELECT 1";
             cmd.CommandTimeout = ValidationTimeoutSeconds;
-            using var reader = cmd.ExecuteReader();
-            return reader.Read();
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            return await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {

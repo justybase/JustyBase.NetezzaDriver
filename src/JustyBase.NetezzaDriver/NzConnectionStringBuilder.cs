@@ -19,6 +19,8 @@ public sealed class NzConnectionStringBuilder
     public int MaxPoolSize { get; set; } = 10;
     public int ConnectionIdleTimeout { get; set; } = 30;
     public int ConnectionLifetime { get; set; } = 0;
+    /// <summary>Seconds a connection may remain idle before the pool probes it; zero validates on every checkout.</summary>
+    public int ConnectionValidationInterval { get; set; } = 0;
 
     public override string ToString()
         => BuildConnectionString(redactPassword: false);
@@ -41,6 +43,8 @@ public sealed class NzConnectionStringBuilder
         sb.Append($"ConnectionIdleTimeout={ConnectionIdleTimeout};");
         if (ConnectionLifetime > 0)
             sb.Append($"ConnectionLifetime={ConnectionLifetime};");
+        if (ConnectionValidationInterval > 0)
+            sb.Append($"ConnectionValidationInterval={ConnectionValidationInterval};");
         return sb.ToString();
     }
     public string ConnectionString => ToString();
