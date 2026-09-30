@@ -69,6 +69,7 @@ public class PoolTests : IAsyncLifetime
         var pooled2 = await _pool.RentAsync();
         int pid2 = pooled2.Connection.Pid;
         Assert.Equal(pid1, pid2);
+        Assert.Equal(1, _pool.ConnectionValidationCount);
         await pooled2.DisposeAsync();
     }
 
@@ -130,6 +131,74 @@ public class PoolUnitTests
         Assert.Equal(10, builder.MaxPoolSize);
         Assert.Equal(30, builder.ConnectionIdleTimeout);
         Assert.Equal(0, builder.ConnectionLifetime);
+        Assert.Equal(0, builder.ConnectionValidationInterval);
+    }
+
+    [Fact]
+    public async Task PoolValidationIntervalUsesIdleDurationAndDefaultsToEveryCheckout()
+    {
+        var now = DateTime.UtcNow;
+        var intervalPool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "host",
+            Database = "db",
+            UserName = "user",
+            Password = "pass",
+            ConnectionValidationInterval = 60
+        });
+        Assert.False(intervalPool.ShouldValidateIdleConnection(now.AddSeconds(-59), now));
+        Assert.True(intervalPool.ShouldValidateIdleConnection(now.AddSeconds(-60), now));
+        await intervalPool.DisposeAsync();
+
+        var defaultPool = new NzConnectionPool("host", "db", "user", "pass");
+        Assert.True(defaultPool.ShouldValidateIdleConnection(now, now));
+        await defaultPool.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task PoolValidationIntervalNeverSkipsClosedConnectionCheck()
+    {
+        var now = DateTime.UtcNow;
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "host",
+            Database = "db",
+            UserName = "user",
+            Password = "pass",
+            ConnectionValidationInterval = 60
+        });
+        using var closedConnection = new NzConnection("user", "pass", "host", "db");
+
+        Assert.False(pool.ShouldValidateIdleConnection(now.AddSeconds(-1), now));
+        Assert.True(pool.ShouldValidateIdleConnection(closedConnection, now.AddSeconds(-1), now));
+        await pool.DisposeAsync();
+    }
+
+    [Fact]
+    public void NegativePoolValidationIntervalIsRejected()
+    {
+        var builder = new NzConnectionStringBuilder
+        {
+            Host = "host",
+            Database = "db",
+            UserName = "user",
+            Password = "pass",
+            ConnectionValidationInterval = -1
+        };
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new NzConnectionPool(builder));
+    }
+
+    [Fact]
+    public void LegacyPoolConstructorSignatureRemainsAvailable()
+    {
+        var parameterTypes = new[]
+        {
+            typeof(string), typeof(string), typeof(string), typeof(string),
+            typeof(int), typeof(int), typeof(int), typeof(int), typeof(int)
+        };
+
+        Assert.NotNull(typeof(NzConnectionPool).GetConstructor(parameterTypes));
     }
 
     [Fact]
@@ -151,5 +220,41 @@ public class PoolUnitTests
         Assert.Contains("Pooling=True", s);
         Assert.Contains("MinPoolSize=2", s);
         Assert.Contains("MaxPoolSize=20", s);
+        builder.ConnectionValidationInterval = 45;
+        Assert.Contains("ConnectionValidationInterval=45", builder.ToString());
+    }
+}
+
+[Trait("Category", "Integration")]
+public class PoolValidationIntervalIntegrationTests
+{
+    [Fact]
+    public async Task PoolValidationIntervalSkipsRecentIdleConnectionProbe()
+    {
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = Config.Host,
+            Database = Config.DbName,
+            UserName = Config.UserName,
+            Password = Config.Password,
+            Port = Config.Port,
+            MaxPoolSize = 1,
+            ConnectionValidationInterval = 60
+        });
+        try
+        {
+            var first = await pool.RentAsync();
+            int pid = first.Connection.Pid;
+            await first.DisposeAsync();
+
+            var second = await pool.RentAsync();
+            Assert.Equal(pid, second.Connection.Pid);
+            Assert.Equal(0, pool.ConnectionValidationCount);
+            await second.DisposeAsync();
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
     }
 }

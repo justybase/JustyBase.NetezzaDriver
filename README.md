@@ -141,7 +141,7 @@ var result = await cmd.ExecuteScalarAsync();
 | `connectionIdleTimeoutSeconds` | `30` | Close idle connections after this |
 | `connectionLifetimeSeconds` | `0` | Max connection age (0 = unlimited) |
 
-The pool validates connections with `SELECT 1`, automatically rolls back open transactions on return, and runs a background maintenance timer every 30 seconds.
+The pool validates connections with an asynchronous `SELECT 1`, automatically rolls back open transactions on return, and runs a background maintenance timer every 30 seconds. Validation runs on every checkout by default; set `ConnectionValidationInterval` on `NzConnectionStringBuilder` to a positive number of seconds to skip probes for recently idle connections.
 
 See [docs/pooling.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/pooling.md) for details.
 

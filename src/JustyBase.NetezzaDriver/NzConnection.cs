@@ -2619,19 +2619,33 @@ public sealed class NzConnection : DbConnection
     
     private string GetFixedLenString(int curField, Span<byte> fieldDataP, int fldlen, int cursize)
     {
-        Span<char> chars = fldlen < 120 ? stackalloc char[fldlen] : new char[fldlen];
+        if (fldlen < 120)
+        {
+            Span<char> chars = stackalloc char[fldlen];
+            return DecodeFixedLenString(curField, fieldDataP, fldlen, cursize, chars);
+        }
+
+        char[] rented = ArrayPool<char>.Shared.Rent(fldlen);
+        try
+        {
+            return DecodeFixedLenString(curField, fieldDataP, fldlen, cursize, rented.AsSpan(0, fldlen));
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(rented, clearArray: true);
+        }
+    }
+
+    private string DecodeFixedLenString(
+        int curField, Span<byte> fieldDataP, int fldlen, int cursize, scoped Span<char> chars)
+    {
         NzConnectionHelpers.ClientEncoding.TryGetChars(fieldDataP.Slice(2, cursize), chars, out int charsRead);
         chars[charsRead..fldlen].Fill(' ');
         var spanData = chars[0..fldlen];
         var sp = _nzCommand?.GetColumnStringPool(curField);
         if (UseStringPool && sp is not null)
-        {
             return sp.GetString(spanData);
-        }
-        else
-        {
-            return new string(spanData);
-        }
+        return new string(spanData);
     }
 
     /// <summary>
@@ -2708,12 +2722,15 @@ public sealed class NzConnection : DbConnection
             _row = new RowValue[numFields];
         }
 
+        PrepareVariableFieldOffsets(data);
+
         int fieldLf = 0;
         int curField = 0;
 
         while (fieldLf < numFields && curField < numFields)
         {
             ref RowValue rowValue = ref _row[fieldLf];
+            rowValue.ResetForReuse(); // Drop references retained by the previous row before reusing this slot.
             //CTableFieldAt can span be used here ? - to reduce alocation
             Span<byte> fieldDataP = CTableFieldAt(data, curField);
 
@@ -2990,6 +3007,9 @@ public sealed class NzConnection : DbConnection
         return _tupdesc.FieldSize[curField];
     }
 
+    private int[] _variableFieldOffsets = Array.Empty<int>();
+    private int _variableFieldOffsetCount;
+
     private Span<byte> CTableFieldAt(byte[] data, int curField)
     {
         if (_tupdesc.FieldFixedSize[curField] != 0)
@@ -2997,26 +3017,49 @@ public sealed class NzConnection : DbConnection
             return CTableIFixedFieldPtr(data, _tupdesc.FieldOffset[curField]);
         }
 
-        return NzConnection.CTableIVarFieldPtr(data, _tupdesc.FixedFieldsSize, _tupdesc.FieldOffset[curField]);
+        int variableOrdinal = _tupdesc.FieldOffset[curField];
+        if ((uint)variableOrdinal >= (uint)_variableFieldOffsetCount)
+        {
+            throw new InvalidDataException($"Invalid varying-field offset {variableOrdinal} for column {curField + 1}.");
+        }
+        return data.AsSpan()[_variableFieldOffsets[variableOrdinal]..];
     }
 
-    private static Span<byte> CTableIVarFieldPtr(byte[] data, int fixedOffset, int varDex)
+    internal static void FillVariableFieldOffsets(ReadOnlySpan<byte> data, int fixedOffset, Span<int> offsets)
     {
-        Span<byte> lenP = data.AsSpan().Slice(fixedOffset);
-        for (int ctr = 0; ctr < varDex; ctr++)
-        {
-            int length = BitConverter.ToInt16(lenP);
-            if (length % 2 == 0)
-            {
-                lenP = lenP.Slice(length);
-            }
-            else
-            {
-                lenP = lenP.Slice(length + 1);
-            }
-        }
+        if ((uint)fixedOffset > (uint)data.Length)
+            throw new InvalidDataException("The fixed-field area extends beyond the row payload.");
 
-        return lenP;
+        int position = fixedOffset;
+        for (int i = 0; i < offsets.Length; i++)
+        {
+            if (position > data.Length - sizeof(short))
+                throw new InvalidDataException("The varying-field length prefix is truncated.");
+
+            int length = BitConverter.ToInt16(data.Slice(position, sizeof(short)));
+            if (length < sizeof(short))
+                throw new InvalidDataException("The varying-field length is invalid.");
+
+            int paddedLength = length + (length & 1);
+            if (paddedLength > data.Length - position)
+                throw new InvalidDataException("The varying-field payload extends beyond the row.");
+
+            offsets[i] = position;
+            position += paddedLength;
+        }
+    }
+
+    private void PrepareVariableFieldOffsets(byte[] data)
+    {
+        int count = _tupdesc.NumVaryingFields ?? 0;
+        if (count < 0)
+            throw new InvalidDataException("The varying-field count is invalid.");
+        if (_variableFieldOffsets.Length < count)
+            Array.Resize(ref _variableFieldOffsets, count);
+
+        _variableFieldOffsetCount = count;
+        if (count > 0)
+            FillVariableFieldOffsets(data, _tupdesc.FixedFieldsSize, _variableFieldOffsets.AsSpan(0, count));
     }
 
     private static Span<byte> CTableIFixedFieldPtr(byte[] data, int offset)
@@ -3048,6 +3091,7 @@ public sealed class NzConnection : DbConnection
             var positionInByteToTest = 7 - columnNumber % 8;
             var nullHelpValue = byteToTest & (1 << positionInByteToTest);
             ref RowValue rowValue = ref _row[columnNumber];
+            rowValue.ResetForReuse(); // Drop references retained by the previous row before reusing this slot.
             if (nullHelpValue == 0)
             {
                 rowValue.typeCode = TypeCodeEx.Empty;
