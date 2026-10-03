@@ -42,7 +42,7 @@ internal static class DateTypes
     /// </summary>
     /// <param name="data">The data containing the timestamp.</param>
     /// <returns>The converted DateTime value.</returns>
-    internal static DateTime TimestampRecvInt(Span<byte> data)
+    internal static DateTime TimestampRecvInt(ReadOnlySpan<byte> data)
     {
         int seconds = BitConverter.ToInt32(data);
         return DateTime.UnixEpoch.AddSeconds(seconds);
@@ -56,7 +56,7 @@ internal static class DateTypes
     /// </summary>
     /// <param name="data"></param>
     /// <returns></returns>
-    internal static /*DateTime*/string TimeRecvFloatX1(Span<byte> data)
+    internal static /*DateTime*/string TimeRecvFloatX1(ReadOnlySpan<byte> data)
     {
         long micros = BitConverter.ToInt64(data);
         var ts = new TimeSpan(micros * TimeSpan.TicksPerMicrosecond);
@@ -83,7 +83,7 @@ internal static class DateTypes
     /// </summary>
     /// <param name="data"></param>
     /// <returns></returns>
-    internal static TimeSpan TimeRecvFloatX2(Span<byte> data)
+    internal static TimeSpan TimeRecvFloatX2(ReadOnlySpan<byte> data)
     {
         long micros = BitConverter.ToInt64(data);
         return TimeSpan.FromMicroseconds(micros);

@@ -51,6 +51,8 @@ public sealed class NzCommand : DbCommand
 
     private NzConnection _connection;
     private readonly NzParameterCollection _parameters = [];
+    private string? _cachedParamSql;
+    private NzParameterHelper.SqlTemplatePlan? _cachedParamPlan;
 
     internal int _recordsAffected = -1;
 
@@ -93,7 +95,37 @@ public sealed class NzCommand : DbCommand
     private string ResolveCommandText(string operation)
     {
         if (_parameters is not null && _parameters.Count > 0)
-            return NzParameterHelper.SubstituteParameters(operation, _parameters);
+        {
+            // Cache the parsed template per CommandText value: avoids rescanning
+            // quotes/comments/dollar-quotes on every Execute with the same text.
+            // The plan depends only on SQL (offsets), not parameter values.
+            var cachedPlan = _cachedParamPlan;
+            var cachedSql = _cachedParamSql;
+            if (cachedPlan is null || cachedSql is null || !string.Equals(cachedSql, operation, StringComparison.Ordinal))
+            {
+                cachedPlan = NzParameterHelper.ParseTemplate(operation);
+                _cachedParamSql = operation;
+                _cachedParamPlan = cachedPlan;
+            }
+            return NzParameterHelper.RenderWithPlan(operation, cachedPlan, _parameters);
+        }
+
+        // No parameters: still need to detect stray placeholders, but avoid
+        // parsing when the text is unchanged and known to be placeholder-free.
+        // Fast path: if same SQL as cached and cached plan is empty, return directly.
+        if (_cachedParamSql is not null && string.Equals(_cachedParamSql, operation, StringComparison.Ordinal)
+            && _cachedParamPlan is not null && _cachedParamPlan.Placeholders.Length == 0)
+            return operation;
+
+        var plan0 = NzParameterHelper.ParseTemplate(operation);
+        if (plan0.Placeholders.Length > 0)
+        {
+            var first = plan0.Placeholders[0];
+            string name = first.IsNamed ? operation.Substring(first.Start, first.Length) : "?";
+            throw new InvalidOperationException($"Missing value for SQL parameter '{name}'.");
+        }
+        _cachedParamSql = operation;
+        _cachedParamPlan = plan0;
         return operation;
     }
 

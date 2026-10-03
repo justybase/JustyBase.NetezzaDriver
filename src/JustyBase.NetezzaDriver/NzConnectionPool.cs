@@ -20,6 +20,8 @@ public sealed class NzConnectionPool : IAsyncDisposable
     private readonly TimeSpan _maxLifetime;
     private readonly TimeSpan _validationInterval;
     private readonly SemaphoreSlim _semaphore;
+    // Guards only the multi-step maintenance/clear drains that dequeue and may
+    // re-enqueue. Rent/return use ConcurrentQueue atomically without this lock.
     private readonly SemaphoreSlim _idleLock = new(1, 1);
     private readonly ConcurrentQueue<IdleConnection> _idle = new();
     private readonly ConcurrentDictionary<int, NzConnection> _active = new();
@@ -89,17 +91,11 @@ public sealed class NzConnectionPool : IAsyncDisposable
         {
             while (true)
             {
-                IdleConnection idleEntry;
-                await _idleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try
-                {
-                    if (!_idle.TryDequeue(out idleEntry))
-                        break;
-                }
-                finally
-                {
-                    _idleLock.Release();
-                }
+                // Lock-free fast path: ConcurrentQueue.TryDequeue is thread-safe.
+                // The previous _idleLock serialized all checkouts without adding
+                // correctness (validation happens outside any lock anyway).
+                if (!_idle.TryDequeue(out var idleEntry))
+                    break;
 
                 var candidate = idleEntry.Connection;
                 bool needsValidation = ShouldValidateIdleConnection(candidate, idleEntry.ReturnedAtUtc, DateTime.UtcNow);
@@ -153,7 +149,8 @@ public sealed class NzConnectionPool : IAsyncDisposable
         {
             if (connection.InTransaction)
             {
-                connection.Rollback();
+                // Async path: must not block the pool with sync network I/O.
+                await connection.RollbackAsync().ConfigureAwait(false);
             }
         }
         catch
@@ -166,15 +163,8 @@ public sealed class NzConnectionPool : IAsyncDisposable
         }
 
         _active.TryRemove(pid, out _);
-        await _idleLock.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            _idle.Enqueue(new IdleConnection(connection, DateTime.UtcNow));
-        }
-        finally
-        {
-            _idleLock.Release();
-        }
+        // Lock-free fast path: ConcurrentQueue.Enqueue is thread-safe.
+        _idle.Enqueue(new IdleConnection(connection, DateTime.UtcNow));
         _semaphore.Release();
     }
 

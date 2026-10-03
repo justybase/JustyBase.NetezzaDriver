@@ -16,6 +16,13 @@ public sealed class Sylvan
     const int DefaultCapacity = 64;
     const int StringSizeLimit = 32;
     const int CollisionLimit = 8;
+    /// <summary>
+    /// Maximum interned entries per pool. Beyond this, new strings are
+    /// returned without interning to bound memory on high-cardinality columns.
+    /// Pools are per-query/per-column; 4096 short strings bound the pool to
+    /// roughly hundreds of KB worst case instead of growing without limit.
+    /// </summary>
+    const int MaxEntries = 4096;
 
     // This is a greatly-simplified HashSet<string> that only allows additions.
     // and accepts char[] instead of string.
@@ -96,6 +103,11 @@ public sealed class Sylvan
         }
 
         int count = this.count;
+        if (count >= MaxEntries)
+        {
+            // High-cardinality column: do not grow the pool without bound.
+            return new string(buffer);
+        }
         if (count == entries.Length)
         {
             entries = Resize();

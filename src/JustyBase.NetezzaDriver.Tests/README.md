@@ -68,7 +68,7 @@ names against `nzpy-extended` as a lightweight reference. It needs Python 3.12
 or newer and `nzpy-extended` installed in the selected interpreter:
 
 ```bash
-python3 -m pip install nzpy-extended==0.0.1
+python3 -m pip install nzpy-extended==0.7.3
 NZPY_EXTENDED_PYTHON=python3 dotnet test src/JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj --framework net10.0 --filter "FullyQualifiedName~NzpyExtendedResultCompatibilityTests"
 ```
 

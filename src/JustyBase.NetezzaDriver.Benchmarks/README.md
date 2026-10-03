@@ -70,3 +70,93 @@ Run it with:
 dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net10.0 -- \
   --filter '*VariableFieldOffsetBench*'
 ```
+
+### Read-buffer and row-decode changes (2026)
+
+`NzConnection` now owns a single application-level read buffer
+(`NzReadBuffer`) layered directly over the raw `NetworkStream`/`SslStream`.
+The public `Open`/`OpenAsync` overloads default to `useBufferedStream: false`;
+passing `true` still opts into the legacy `BufferedStream` (which would double
+buffer and reintroduced an intermittent socket-read timeout on long result
+sets). Protocol primitives are served from the buffer, `RowStandard` payloads
+are decoded in place (no per-row copy into `_tmp_buffer`), per-field descriptor
+lists are frozen into arrays, the type dispatch is a single `switch`, and the
+per-read byte-offset for diagnostics is computed only when debug logging is
+enabled.
+
+Synthetic results on .NET 10 NativeAOT, AMD Ryzen 7 7840HS, `ShortRun`, no
+server:
+
+| Method | Old | New | Ratio |
+|--------|----:|----:|------:|
+| Stream.ReadExactly per int32 vs NzReadBuffer in-buffer | 3,731 ns | 1,230 ns | 0.33x |
+| Interpolated validation context vs numeric fast check | 28,462 ns | 240 ns | 0.06x |
+| Linked CTS per command vs reused `TryReset` | 57.9 ns / 144 B | 37.6 ns / 0 B | 0.65x |
+| `GetValue` boxing vs `GetFieldValue<int>` | 3.16 ns / 24 B | 0.97 ns / 0 B | 0.31x |
+| Reparse parameters per execute vs cached plan | 18,233 ns | 10,850 ns | 0.60x |
+
+`LiveReaderBench` measures the same reader path end-to-end against a live
+Netezza instance (50k rows per scenario, `ShortRun`). Before and after the
+unified-buffer/decode work the means were within noise:
+
+| Scenario | Before | After |
+|----------|-------:|------:|
+| MixedWide_50k | 562.6 ms | 552.3 ms |
+| Numeric_50k | 2,200.5 ms | 2,226.0 ms |
+| Text_50k | 1,332.0 ms | 1,332.5 ms |
+
+The end-to-end result is dominated by backend execution and network round
+trips, so the client-side read/decode reductions do not move these totals; they
+show up in the isolated microbenchmarks above and removed the intermittent
+15 s socket timeouts previously seen while draining large result sets.
+
+```bash
+dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net10.0 -- \
+  --filter '*LiveReaderBench*'
+```
+
+### Database-free replay benchmark
+
+`ReplayReaderBench` removes the live database from the equation entirely. A real
+query response is recorded byte-for-byte through `RecordingProxy`, split into one
+server segment per frontend query, and stored as a `.nzreplay.gz` fixture.
+`NzReplayServer` replays those segments over a loopback TCP socket, so the driver
+follows its normal socket/handshake code paths with no database or real network
+latency. One connection is opened once and reused; the final segment is repeated
+for subsequent identical queries. `ReplayReaderBench` and `NzReplayTests`
+(`Category=Unit`) use the same fixtures, so the client read path can be measured
+and regression-tested without `NZ_DEV_HOST`.
+
+Recording fixtures (requires a live server; writes to
+`src/JustyBase.NetezzaDriver.TestSupport/Fixtures`):
+
+```bash
+dotnet run -c Release --project tools/NzReplayCapture
+```
+
+Running the replay benchmark and the database-free replay tests:
+
+```bash
+dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net10.0 -- \
+  --filter '*ReplayReaderBench*'
+dotnet test src/JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj -c Release \
+  --filter 'FullyQualifiedName~NzReplayTests'
+```
+
+Measured on .NET 10 NativeAOT, AMD Ryzen 7 7840HS, `ShortRun`, loopback replay,
+`GetValue` over every column:
+
+| Scenario | Old (HEAD 1.9.3) | New | Speedup | Allocated old | Allocated new |
+|----------|-----------------:|----:|--------:|--------------:|--------------:|
+| DimDate 3,652 x 19 | 21.98 ms | 2.384 ms | ~9.2x | 3.23 MB | 1.10 MB |
+| Fact 200,000 x 7 | 1,098.82 ms | 47.134 ms | ~23x | 138.87 MB | 19.84 MB |
+
+The baseline is the legacy read path with `useBufferedStream: false`. The legacy
+`BufferedStream` default cannot run the request-paced replay because it throws
+when a write follows a read that left its internal buffer non-empty; that
+limitation is one of the reasons the read path now owns a single application
+buffer. These numbers isolate client read/decode cost; they do not represent
+end-to-end query time, which stays dominated by the backend (see
+`LiveReaderBench` above).
+
+

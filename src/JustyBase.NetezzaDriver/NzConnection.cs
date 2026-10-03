@@ -9,6 +9,7 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace JustyBase.NetezzaDriver;
@@ -39,6 +40,13 @@ public sealed class NzConnection : DbConnection
     /// this should be used mailny for reading and writing?
     /// </summary>
     Stream _stream = default!;
+
+    /// <summary>
+    /// Application-level read buffer layered over <see cref="_stream"/>.
+    /// Serves protocol primitives without a stream call each and lets row
+    /// payloads be decoded in place (no per-row copy).
+    /// </summary>
+    private NzReadBuffer? _readBuffer;
 
     private readonly List<string> _commandsWithCount = ["INSERT", "DELETE", "UPDATE"];
     private readonly ILogger? _logger = null!;
@@ -694,9 +702,16 @@ public sealed class NzConnection : DbConnection
     private bool TryReadByteNow(out byte value)
     {
         value = 0;
-        if (_stream is null || _socket is null)
+        if (_readBuffer is null || _socket is null)
         {
             return false;
+        }
+
+        // Prefer bytes already buffered by the read buffer: no socket probing.
+        if (_readBuffer.BytesBuffered > 0)
+        {
+            value = _readBuffer.ReadByte();
+            return true;
         }
 
         // Non-blocking probe: BufferedStream/SslStream return immediately when they
@@ -730,7 +745,8 @@ public sealed class NzConnection : DbConnection
 
     private void ReadExactWithDeadline(Span<byte> buffer, long deadlineTickCount64, string? context, string detail)
     {
-        int offset = 0;
+        // Bytes already in the application buffer are available immediately.
+        int offset = _readBuffer!.ReadBuffered(buffer);
         while (offset < buffer.Length)
         {
             if (Environment.TickCount64 > deadlineTickCount64)
@@ -803,6 +819,13 @@ public sealed class NzConnection : DbConnection
             return true;
         }
 
+        // Serve from the read buffer before touching the socket deadline logic.
+        if (_readBuffer is not null && _readBuffer.BytesBuffered > 0)
+        {
+            value = _readBuffer.ReadByte();
+            return true;
+        }
+
         if (Environment.TickCount64 > deadlineTickCount64)
         {
             value = 0;
@@ -847,7 +870,7 @@ public sealed class NzConnection : DbConnection
     /// </summary>
     private void EnsureProtocolSynced(string? context = null)
     {
-        if (_stream is null || _socket is null)
+        if (_stream is null || _socket is null || _readBuffer is null)
         {
             return;
         }
@@ -979,7 +1002,7 @@ public sealed class NzConnection : DbConnection
         //if (State == ConnectionState.Executing)
         if (State != ConnectionState.Connecting)
         {
-            PGUtil.Skip4Bytes(_stream!);
+            _readBuffer!.Skip(4);
             EnsureProtocolSynced(query);
         }
         if (query is not null)
@@ -1014,7 +1037,8 @@ public sealed class NzConnection : DbConnection
         }
         _stream.Write(_tmp_buffer,0,written);
         _stream.Flush();
-        _logger?.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(_tmp_buffer,0,written));
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(_tmp_buffer,0,written));
         _state = ConnectionState.Executing;
     }
 
@@ -1063,7 +1087,8 @@ public sealed class NzConnection : DbConnection
         }
         await _stream.WriteAsync(_tmp_buffer.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        _logger?.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(_tmp_buffer, 0, written));
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(_tmp_buffer, 0, written));
         _state = ConnectionState.Executing;
     }
 
@@ -1079,7 +1104,7 @@ public sealed class NzConnection : DbConnection
         }
 
         byte[] buf = buffer ?? new byte[length];
-        _stream.ReadExactly(buf, 0, length);
+        _readBuffer!.ReadExactly(buf.AsSpan(0, length));
         return buf;
     }
 
@@ -1095,7 +1120,7 @@ public sealed class NzConnection : DbConnection
         }
 
         byte[] buf = buffer ?? new byte[length];
-        await _stream.ReadExactlyAsync(buf.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
+        await _readBuffer!.ReadExactlyAsync(buf.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
         return buf;
     }
     private void WriteSpan(Span<byte> buf)
@@ -1122,8 +1147,9 @@ public sealed class NzConnection : DbConnection
     {
         while (count > 0)
         {
-            int chunkSize = Math.Min(count, _tmp_buffer.Length);
-            await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, chunkSize), cancellationToken).ConfigureAwait(false);
+            int chunkSize = Math.Min(count, _readBuffer!.Capacity);
+            await _readBuffer.EnsureAsync(chunkSize, cancellationToken).ConfigureAwait(false);
+            _readBuffer.Skip(chunkSize);
             count -= chunkSize;
         }
     }
@@ -1247,6 +1273,8 @@ public sealed class NzConnection : DbConnection
         }
     }
 
+    private CancellationTokenSource? _cachedTimeoutCts;
+
     private CancellationTokenSource? CreateCommandTimeoutTokenSource(CancellationToken cancellationToken)
     {
         if (CommandTimeout <= TimeSpan.Zero || CommandTimeout == Timeout.InfiniteTimeSpan)
@@ -1258,6 +1286,60 @@ public sealed class NzConnection : DbConnection
         linkedCts.CancelAfter(CommandTimeout);
         return linkedCts;
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryGetCommandTimeoutToken(
+        CancellationToken callerToken,
+        out CancellationToken effectiveToken,
+        out CancellationTokenSource? linkedToDispose,
+        out CancellationTokenSource? timeoutSource)
+    {
+        if (CommandTimeout <= TimeSpan.Zero || CommandTimeout == Timeout.InfiniteTimeSpan)
+        {
+            effectiveToken = callerToken;
+            linkedToDispose = null;
+            timeoutSource = null;
+            return false;
+        }
+
+        // Common path: caller token cannot be canceled (default). Reuse a
+        // per-connection CTS via TryReset to avoid allocating a linked CTS
+        // + Timer per command. Sequential use only; concurrent executes on
+        // the same connection are already unsupported (single stream).
+        if (!callerToken.CanBeCanceled)
+        {
+            var cached = _cachedTimeoutCts;
+            if (cached is null)
+            {
+                cached = new CancellationTokenSource();
+                _cachedTimeoutCts = cached;
+            }
+            else if (!cached.TryReset())
+            {
+                // Outstanding registrations (should not happen after prior
+                // operations completed); replace to stay safe.
+                cached.Dispose();
+                cached = new CancellationTokenSource();
+                _cachedTimeoutCts = cached;
+            }
+            cached.CancelAfter(CommandTimeout);
+            effectiveToken = cached.Token;
+            linkedToDispose = null;
+            timeoutSource = cached;
+            return true;
+        }
+
+        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        linkedCts.CancelAfter(CommandTimeout);
+        effectiveToken = linkedCts.Token;
+        linkedToDispose = linkedCts;
+        timeoutSource = linkedCts;
+        return true;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsCommandTimeout(CancellationTokenSource? timeoutSource, CancellationToken callerToken)
+        => timeoutSource is not null && timeoutSource.IsCancellationRequested && !callerToken.IsCancellationRequested;
 
 
     public bool Execute(NzCommand nzCommand, string query)
@@ -1280,30 +1362,31 @@ public sealed class NzConnection : DbConnection
     public async Task<bool> ExecuteAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        using var timeoutCts = CreateCommandTimeoutTokenSource(cancellationToken);
-        var effectiveCancellationToken = timeoutCts?.Token ?? cancellationToken;
-
-        try
+        TryGetCommandTimeoutToken(cancellationToken, out var effectiveCancellationToken, out var linkedCts, out var timeoutSource);
+        using (linkedCts)
         {
-            await PreExecutionAsync(nzCommand, query, effectiveCancellationToken).ConfigureAwait(false);
-            _nextRelatedFileStream = null!;
-
-            while (await DoNextStepAsync(nzCommand, effectiveCancellationToken).ConfigureAwait(false)) ;
-            var response = true;
-
-            if (_error != null)
+            try
             {
-                throw CreateCurrentException();
-            }
+                await PreExecutionAsync(nzCommand, query, effectiveCancellationToken).ConfigureAwait(false);
+                _nextRelatedFileStream = null!;
 
-            return response;
-        }
-        catch (OperationCanceledException) when (timeoutCts is not null && timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-        {
-            CancelQuery();
-            _error = "Command timeout";
-            _backendException = null;
-            throw new NetezzaException(_error);
+                while (await DoNextStepAsync(nzCommand, effectiveCancellationToken).ConfigureAwait(false)) ;
+                var response = true;
+
+                if (_error != null)
+                {
+                    throw CreateCurrentException();
+                }
+
+                return response;
+            }
+            catch (OperationCanceledException) when (IsCommandTimeout(timeoutSource, cancellationToken))
+            {
+                CancelQuery();
+                _error = "Command timeout";
+                _backendException = null;
+                throw new NetezzaException(_error);
+            }
         }
     }
 
@@ -1323,27 +1406,28 @@ public sealed class NzConnection : DbConnection
     public async Task<NzDataReader> ExecuteReaderAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        using var timeoutCts = CreateCommandTimeoutTokenSource(cancellationToken);
-        var effectiveCancellationToken = timeoutCts?.Token ?? cancellationToken;
-
-        try
+        TryGetCommandTimeoutToken(cancellationToken, out var effectiveCancellationToken, out var linkedCts, out var timeoutSource);
+        using (linkedCts)
         {
-            await PreExecutionAsync(nzCommand, query, effectiveCancellationToken).ConfigureAwait(false);
-            _nextRelatedFileStream = null!;
-            var rdr = await NzDataReader.CreateAsync(nzCommand, effectiveCancellationToken).ConfigureAwait(false);
-            if (_error != null)
+            try
             {
-                throw CreateCurrentException();
-            }
+                await PreExecutionAsync(nzCommand, query, effectiveCancellationToken).ConfigureAwait(false);
+                _nextRelatedFileStream = null!;
+                var rdr = await NzDataReader.CreateAsync(nzCommand, effectiveCancellationToken).ConfigureAwait(false);
+                if (_error != null)
+                {
+                    throw CreateCurrentException();
+                }
 
-            return rdr;
-        }
-        catch (OperationCanceledException) when (timeoutCts is not null && timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-        {
-            CancelQuery();
-            _error = "Command timeout";
-            _backendException = null;
-            throw new NetezzaException(_error);
+                return rdr;
+            }
+            catch (OperationCanceledException) when (IsCommandTimeout(timeoutSource, cancellationToken))
+            {
+                CancelQuery();
+                _error = "Command timeout";
+                _backendException = null;
+                throw new NetezzaException(_error);
+            }
         }
     }
 
@@ -1412,41 +1496,61 @@ public sealed class NzConnection : DbConnection
 
     internal void ReadNextResponseByte()
     {
-        _lastResponse = _stream.ReadByte();
+        _lastResponse = _readBuffer!.ReadByteOrEof();
         _shouldReadByte = false;
     }
 
     private async ValueTask<int> ReadByteAsync(CancellationToken cancellationToken = default)
     {
-        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, 1), cancellationToken).ConfigureAwait(false);
-        return _tmp_buffer[0];
+        await _readBuffer!.EnsureAsync(1, cancellationToken).ConfigureAwait(false);
+        return _readBuffer.ReadByte();
     }
 
     private async ValueTask<int> ReadInt32Async(CancellationToken cancellationToken = default)
     {
-        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, 4), cancellationToken).ConfigureAwait(false);
-        return IUnpack(_tmp_buffer);
+        await _readBuffer!.EnsureAsync(4, cancellationToken).ConfigureAwait(false);
+        return _readBuffer.ReadInt32BigEndian();
     }
 
     private async ValueTask<short> ReadInt16Async(CancellationToken cancellationToken = default)
     {
-        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
-        return HUnpack(_tmp_buffer);
+        await _readBuffer!.EnsureAsync(2, cancellationToken).ConfigureAwait(false);
+        return _readBuffer.ReadInt16BigEndian();
     }
 
-    private long ProtocolReadOffset => _stream is ProtocolCountingStream countingStream
-        ? countingStream.BytesRead
-        : -1;
+    private long ProtocolReadOffset => _readBuffer?.ConsumedBytes ?? -1;
 
     private string ProtocolResponseType => (uint)_lastResponse <= byte.MaxValue
         ? $"{(char)_lastResponse} (0x{_lastResponse:X2})"
         : $"0x{_lastResponse:X}";
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int ValidateProtocolLength(
         int length,
         string field,
         bool allowZero = true,
         long? offset = null)
+    {
+        // Fast path: numeric checks only. No string interpolation, no context,
+        // no exception object on success.
+        if ((uint)length <= (uint)ProtocolLengthValidator.MaxPayloadLength)
+        {
+            if (allowZero || length != 0)
+            {
+                if (length >= 0)
+                    return length;
+            }
+        }
+
+        return ValidateProtocolLengthSlow(length, field, allowZero, offset);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int ValidateProtocolLengthSlow(
+        int length,
+        string field,
+        bool allowZero,
+        long? offset)
     {
         var context =
             $"response={ProtocolResponseType}, row={_currentProtocolRowNumber}, offset={offset ?? ProtocolReadOffset}";
@@ -1461,12 +1565,77 @@ public sealed class NzConnection : DbConnection
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int ValidateProtocolLengthAfterOverhead(
         int frameLength,
         int overhead,
         string frameField,
         string payloadField,
         bool payloadAllowZero = true)
+    {
+        // Fast path: pure arithmetic + range checks, no strings/logging.
+        if ((uint)overhead <= (uint)frameLength)
+        {
+            int payloadLength = frameLength - overhead;
+            if ((uint)payloadLength <= (uint)ProtocolLengthValidator.MaxPayloadLength)
+            {
+                if (payloadAllowZero || payloadLength != 0)
+                {
+                    if (frameLength > 0 && payloadLength >= 0)
+                        return ValidateProtocolLengthAfterOverheadFastLog(
+                            frameLength, overhead, frameField, payloadField,
+                            payloadLength);
+                }
+            }
+        }
+
+        return ValidateProtocolLengthAfterOverheadSlow(
+            frameLength, overhead, frameField, payloadField, payloadAllowZero);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int ValidateProtocolLengthAfterOverheadFastLog(
+        int frameLength,
+        int overhead,
+        string frameField,
+        string payloadField,
+        int payloadLength)
+    {
+        // Debug logging only when enabled; otherwise zero additional work.
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            LogDerivedLengthSlow(frameField, payloadField, frameLength, overhead, payloadLength);
+        return payloadLength;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void LogDerivedLengthSlow(
+        string frameField,
+        string payloadField,
+        int frameLength,
+        int overhead,
+        int payloadLength)
+    {
+        _logger?.LogDebug(
+            "Backend protocol derived length: ResponseType={ResponseType} FrameField={FrameField} " +
+            "PayloadField={PayloadField} FrameLength={FrameLength} Overhead={Overhead} " +
+            "PayloadLength={PayloadLength} Offset={Offset} Row={Row}",
+            ProtocolResponseType,
+            frameField,
+            payloadField,
+            frameLength,
+            overhead,
+            payloadLength,
+            ProtocolReadOffset,
+            _currentProtocolRowNumber);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int ValidateProtocolLengthAfterOverheadSlow(
+        int frameLength,
+        int overhead,
+        string frameField,
+        string payloadField,
+        bool payloadAllowZero)
     {
         var context =
             $"response={ProtocolResponseType}, row={_currentProtocolRowNumber}, offset={ProtocolReadOffset}";
@@ -1480,18 +1649,8 @@ public sealed class NzConnection : DbConnection
                 payloadAllowZero,
                 context);
 
-            _logger?.LogDebug(
-                "Backend protocol derived length: ResponseType={ResponseType} FrameField={FrameField} " +
-                "PayloadField={PayloadField} FrameLength={FrameLength} Overhead={Overhead} " +
-                "PayloadLength={PayloadLength} Offset={Offset} Row={Row}",
-                ProtocolResponseType,
-                frameField,
-                payloadField,
-                frameLength,
-                overhead,
-                payloadLength,
-                ProtocolReadOffset,
-                _currentProtocolRowNumber);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                LogDerivedLengthSlow(frameField, payloadField, frameLength, overhead, payloadLength);
 
             return payloadLength;
         }
@@ -1502,9 +1661,22 @@ public sealed class NzConnection : DbConnection
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void LogProtocolLength(
         string field,
-        ReadOnlySpan<byte> rawBytes,
+        string rawHex,
+        int value,
+        long offset)
+    {
+        if (_logger?.IsEnabled(LogLevel.Debug) != true)
+            return;
+        LogProtocolLengthSlow(field, rawHex, value, offset);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void LogProtocolLengthSlow(
+        string field,
+        string rawHex,
         int value,
         long offset)
     {
@@ -1514,47 +1686,44 @@ public sealed class NzConnection : DbConnection
             _lastResponse,
             field,
             value,
-            Convert.ToHexString(rawBytes),
+            rawHex,
             offset,
             _currentProtocolRowNumber);
     }
 
     private int ReadProtocolInt32(string field)
     {
-        var offset = ProtocolReadOffset;
-        Span<byte> rawBytes = stackalloc byte[sizeof(int)];
-        _stream.ReadExactly(rawBytes);
-        var value = BinaryPrimitives.ReadInt32BigEndian(rawBytes);
-        LogProtocolLength(field, rawBytes, value, offset);
+        long offset = ProtocolReadOffset;
+        var value = _readBuffer!.ReadInt32BigEndian(out uint raw);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            LogProtocolLength(field, raw.ToString("X8"), value, offset);
         return value;
     }
 
     private int ReadProtocolLength(string field, bool allowZero = true)
     {
-        var offset = ProtocolReadOffset;
         var value = ReadProtocolInt32(field);
-        return ValidateProtocolLength(value, field, allowZero, offset);
+        return ValidateProtocolLength(value, field, allowZero);
     }
 
     private short ReadProtocolInt16Length(string field, bool allowZero = true)
     {
-        var offset = ProtocolReadOffset;
-        Span<byte> rawBytes = stackalloc byte[sizeof(short)];
-        _stream.ReadExactly(rawBytes);
-        var value = BinaryPrimitives.ReadInt16BigEndian(rawBytes);
-        LogProtocolLength(field, rawBytes, value, offset);
-        return checked((short)ValidateProtocolLength(value, field, allowZero, offset));
+        long offset = ProtocolReadOffset;
+        var value = _readBuffer!.ReadInt16BigEndian(out ushort raw);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            LogProtocolLength(field, raw.ToString("X4"), value, offset);
+        return checked((short)ValidateProtocolLength(value, field, allowZero));
     }
 
     private async ValueTask<int> ReadProtocolInt32Async(
         string field,
         CancellationToken cancellationToken = default)
     {
-        var offset = ProtocolReadOffset;
-        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, sizeof(int)), cancellationToken)
-            .ConfigureAwait(false);
-        var value = BinaryPrimitives.ReadInt32BigEndian(_tmp_buffer.AsSpan(0, sizeof(int)));
-        LogProtocolLength(field, _tmp_buffer.AsSpan(0, sizeof(int)), value, offset);
+        long offset = ProtocolReadOffset;
+        await _readBuffer!.EnsureAsync(sizeof(int), cancellationToken).ConfigureAwait(false);
+        var value = _readBuffer.ReadInt32BigEndian(out uint raw);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            LogProtocolLength(field, raw.ToString("X8"), value, offset);
         return value;
     }
 
@@ -1563,9 +1732,8 @@ public sealed class NzConnection : DbConnection
         bool allowZero = true,
         CancellationToken cancellationToken = default)
     {
-        var offset = ProtocolReadOffset;
         var value = await ReadProtocolInt32Async(field, cancellationToken).ConfigureAwait(false);
-        return ValidateProtocolLength(value, field, allowZero, offset);
+        return ValidateProtocolLength(value, field, allowZero);
     }
 
     private async ValueTask<short> ReadProtocolInt16LengthAsync(
@@ -1573,12 +1741,12 @@ public sealed class NzConnection : DbConnection
         bool allowZero = true,
         CancellationToken cancellationToken = default)
     {
-        var offset = ProtocolReadOffset;
-        await _stream.ReadExactlyAsync(_tmp_buffer.AsMemory(0, sizeof(short)), cancellationToken)
-            .ConfigureAwait(false);
-        var value = BinaryPrimitives.ReadInt16BigEndian(_tmp_buffer.AsSpan(0, sizeof(short)));
-        LogProtocolLength(field, _tmp_buffer.AsSpan(0, sizeof(short)), value, offset);
-        return checked((short)ValidateProtocolLength(value, field, allowZero, offset));
+        long offset = ProtocolReadOffset;
+        await _readBuffer!.EnsureAsync(sizeof(short), cancellationToken).ConfigureAwait(false);
+        var value = _readBuffer.ReadInt16BigEndian(out ushort raw);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            LogProtocolLength(field, raw.ToString("X4"), value, offset);
+        return checked((short)ValidateProtocolLength(value, field, allowZero));
     }
 
     private void ThrowIfProtocolFaulted()
@@ -1666,8 +1834,8 @@ public sealed class NzConnection : DbConnection
         switch (_lastResponse)
         {
             case (byte)'u':
-                PGUtil.Skip4Bytes(_stream, 10);
-                PGUtil.Skip4Bytes(_stream, 16);
+                _readBuffer!.Skip(10);
+                _readBuffer.Skip(16);
                 int length = ReadProtocolLength("externalTable.fileNameLength");
                 var fileNameBytes = Read(length);
                 string fileName = Encoding.UTF8.GetString(fileNameBytes, 0, length);
@@ -1687,7 +1855,7 @@ public sealed class NzConnection : DbConnection
                 return;
 
             case (byte)'x':
-                PGUtil.Skip4Bytes(_stream);
+                _readBuffer!.Skip(4);
                 _logger?.LogWarning("Error operation cancel");
                 return;
         }
@@ -1730,11 +1898,12 @@ public sealed class NzConnection : DbConnection
     private bool IntepretReturnedByte(NzCommand nzCommand)
     {
         _shouldReadByte = true;
-        _logger?.LogDebug(
-            "Backend response: ResponseType={ResponseType} ResponseCode=0x{ResponseCode:X2} Row={Row}",
-            ProtocolResponseType,
-            _lastResponse,
-            _currentProtocolRowNumber);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            _logger.LogDebug(
+                "Backend response: ResponseType={ResponseType} ResponseCode=0x{ResponseCode:X2} Row={Row}",
+                ProtocolResponseType,
+                _lastResponse,
+                _currentProtocolRowNumber);
         ReadProtocolInt32("frameHeaderValue");
 
         if (_lastResponse == (byte)BackendMessageCode.CommandComplete)
@@ -1745,7 +1914,8 @@ public sealed class NzConnection : DbConnection
             var data = Read(length, _tmp_buffer);
             HandleCommandComplete(data, length,  nzCommand);
             //returnet data informs about command type (SELECT/SET VARIABLE/...)
-            _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
         }
         else if (_lastResponse == (byte)BackendMessageCode.ReadyForQuery)
         {
@@ -1768,7 +1938,8 @@ public sealed class NzConnection : DbConnection
             int length = ReadProtocolLength("preparedPayloadLength");
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
-            _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
             //doContinue = true;
         }
         else if (_lastResponse == (byte)BackendMessageCode.ErrorResponse)
@@ -1778,7 +1949,8 @@ public sealed class NzConnection : DbConnection
             var data = Read(length, _tmp_buffer);
             _backendException = new NetezzaException(BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)));
             _error = _backendException.Message;
-            _logger?.LogDebug("Response received from backend: {_error}", _error);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {_error}", _error);
             //doContinue = true;
         }
         //this STARTS (after 'P') single rowset
@@ -1788,7 +1960,7 @@ public sealed class NzConnection : DbConnection
             nzCommand.NewPreparedStatement ??= new PreparedStatement();
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
-            NzConnection.HandleRowDescription(data, nzCommand);
+            HandleRowDescription(data, nzCommand);
             // We've got row_desc that allows us to identify what we're going to get back from this statement.
             //nzCommand.NewPreparedStatement.input_funcs = nzCommand.NewPreparedStatement!.Description!.GetFuncArray;
         }
@@ -1805,7 +1977,7 @@ public sealed class NzConnection : DbConnection
             _tupdesc = new DbosTupleDesc();
             RegenerateBuffer(length);
             var data = Read(length, _tmp_buffer);
-            ResGetDbosColumnDescriptions(data);
+            ResGetDbosColumnDescriptions(data.AsSpan(0, length));
             //doContinue = true;
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowStandard)//!!!!!!, main hot path - read rows
@@ -1828,12 +2000,12 @@ public sealed class NzConnection : DbConnection
                 "fileTransfer.logDirectoryPayloadLength");
             string logDir = Encoding.UTF8.GetString(Read(logDirectoryPayloadLength));
 
-            _stream.ReadByte();
+            _readBuffer!.ReadByte();
             // ignore one byte as it is null character at the end of the string
-            var filenameBuf = new List<byte> { Read(1)[0] };
+            var filenameBuf = new List<byte> { _readBuffer.ReadByte() };
             while (true)
             {
-                var charByte = Read(1)[0];
+                var charByte = _readBuffer.ReadByte();
                 if (charByte == 0x00)
                 {
                     break;
@@ -1842,7 +2014,7 @@ public sealed class NzConnection : DbConnection
             }
 
             string filename = Encoding.UTF8.GetString(filenameBuf.ToArray());
-            int logType = PGUtil.ReadInt32(_stream);
+            int logType = _readBuffer.ReadInt32BigEndian();
             if (!GetFileFromBE(logDir, filename, logType))
             {
                 _logger?.LogDebug("Error in writing file received from BE");
@@ -1856,7 +2028,8 @@ public sealed class NzConnection : DbConnection
             var data = Read(length, _tmp_buffer);
             string notice = BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)).Message;
             OnNoticeReceived(notice, nzCommand);
-            _logger?.LogDebug("Response received from backend: {Notice}", notice);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Notice}", notice);
         }
         else if (_lastResponse == (byte)'I')
         {
@@ -1865,7 +2038,8 @@ public sealed class NzConnection : DbConnection
             var data = Read(length, _tmp_buffer);
             string notice = Encoding.UTF8.GetString(data[0..length]);
             OnNoticeReceived(notice, nzCommand);
-            _logger?.LogDebug("Response received from backend: {Notice}", notice);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Notice}", notice);
             nzCommand.AddRow([]);
         }
 
@@ -1875,11 +2049,12 @@ public sealed class NzConnection : DbConnection
     private async ValueTask<bool> IntepretReturnedByteAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
         _shouldReadByte = true;
-        _logger?.LogDebug(
-            "Backend response: ResponseType={ResponseType} ResponseCode=0x{ResponseCode:X2} Row={Row}",
-            ProtocolResponseType,
-            _lastResponse,
-            _currentProtocolRowNumber);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            _logger.LogDebug(
+                "Backend response: ResponseType={ResponseType} ResponseCode=0x{ResponseCode:X2} Row={Row}",
+                ProtocolResponseType,
+                _lastResponse,
+                _currentProtocolRowNumber);
         await ReadProtocolInt32Async("frameHeaderValue", cancellationToken)
             .ConfigureAwait(false);
 
@@ -1891,7 +2066,8 @@ public sealed class NzConnection : DbConnection
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             HandleCommandComplete(data, length, nzCommand);
-            _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
         }
         else if (_lastResponse == (byte)BackendMessageCode.ReadyForQuery)
         {
@@ -1914,7 +2090,8 @@ public sealed class NzConnection : DbConnection
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
-            _logger?.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
         }
         else if (_lastResponse == (byte)BackendMessageCode.ErrorResponse)
         {
@@ -1925,7 +2102,8 @@ public sealed class NzConnection : DbConnection
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             _backendException = new NetezzaException(BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)));
             _error = _backendException.Message;
-            _logger?.LogDebug("Response received from backend: {_error}", _error);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {_error}", _error);
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescription)
         {
@@ -1935,7 +2113,7 @@ public sealed class NzConnection : DbConnection
             nzCommand.NewPreparedStatement ??= new PreparedStatement();
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
-            NzConnection.HandleRowDescription(data, nzCommand);
+            HandleRowDescription(data, nzCommand);
         }
         else if (_lastResponse == (byte)BackendMessageCode.DataRow)
         {
@@ -1954,7 +2132,7 @@ public sealed class NzConnection : DbConnection
             _tupdesc = new DbosTupleDesc();
             RegenerateBuffer(length);
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
-            ResGetDbosColumnDescriptions(data);
+            ResGetDbosColumnDescriptions(data.AsSpan(0, length));
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowStandard)
         {
@@ -2008,7 +2186,8 @@ public sealed class NzConnection : DbConnection
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             string notice = BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)).Message;
             OnNoticeReceived(notice, nzCommand);
-            _logger?.LogDebug("Response received from backend: {Notice}", notice);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Notice}", notice);
         }
         else if (_lastResponse == (byte)'I')
         {
@@ -2019,7 +2198,8 @@ public sealed class NzConnection : DbConnection
             var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
             string notice = Encoding.UTF8.GetString(data, 0, length);
             OnNoticeReceived(notice, nzCommand);
-            _logger?.LogDebug("Response received from backend: {Notice}", notice);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Response received from backend: {Notice}", notice);
             nzCommand.AddRow([]);
         }
 
@@ -2032,12 +2212,12 @@ public sealed class NzConnection : DbConnection
         ReadProtocolInt32("externalTable.frameHeaderValue");
         int clientVersion = 1;
 
-        byte charByte = Read(1)[0];
+        byte charByte = _readBuffer!.ReadByte();
 
         var filenameBuf = new List<byte> { charByte };
         while (true)
         {
-            charByte = Read(1)[0];
+            charByte = _readBuffer.ReadByte();
             if (charByte == 0x00)
             {
                 break;
@@ -2047,12 +2227,12 @@ public sealed class NzConnection : DbConnection
 
         string filename = NzConnectionHelpers.ClientEncoding.GetString(filenameBuf.ToArray());
 
-        int hostVersion = PGUtil.ReadInt32(_stream);
+        int hostVersion = _readBuffer.ReadInt32BigEndian();
         PGUtil.WriteInt32(_stream, clientVersion);
 
         Flush();
 
-        int format = PGUtil.ReadInt32(_stream);
+        int format = _readBuffer.ReadInt32BigEndian();
         int blockSize = ReadProtocolLength("externalTable.blockSize", allowZero: false);
         _logger?.LogInformation("Format={Format} Block size={BlockSize} Host version={HostVersion}", format, blockSize, hostVersion);
 
@@ -2397,7 +2577,7 @@ public sealed class NzConnection : DbConnection
             int status;
             try
             {
-                status = PGUtil.ReadInt32(_stream);
+                status = _readBuffer!.ReadInt32BigEndian();
             }
             catch (IOException ex)
             {
@@ -2497,7 +2677,7 @@ public sealed class NzConnection : DbConnection
                     byte[] bytes = ArrayPool<byte>.Shared.Rent(numBytes);
                     try
                     {
-                        await _stream.ReadExactlyAsync(bytes.AsMemory(0, numBytes), cancellationToken).ConfigureAwait(false);
+                        await _readBuffer!.ReadExactlyAsync(bytes.AsMemory(0, numBytes), cancellationToken).ConfigureAwait(false);
                         await fh.WriteAsync(bytes.AsMemory(0, numBytes), cancellationToken).ConfigureAwait(false);
                         await fh.FlushAsync(cancellationToken).ConfigureAwait(false);
                     }
@@ -2548,7 +2728,7 @@ public sealed class NzConnection : DbConnection
         }
     }
 
-    private void ResGetDbosColumnDescriptions(byte[] data)
+    private void ResGetDbosColumnDescriptions(ReadOnlySpan<byte> data)
     {
         _protocolRowNumber = 0;
         _currentProtocolRowNumber = 0;
@@ -2562,6 +2742,13 @@ public sealed class NzConnection : DbConnection
         _tupdesc.FixedFieldsSize = IUnpack(data, dataIdx + 24);
         _tupdesc.MaxRecordSize = IUnpack(data, dataIdx + 28);
         _tupdesc.NumFields = IUnpack(data, dataIdx + 32);
+        // NumFields comes straight off the wire, so never pre-size from it
+        // unbounded: a corrupt value could request gigabytes before the field
+        // loop fails on a short payload. Cap by what the payload can hold
+        // (36-byte header + 36 bytes per field + 8-byte trailer); the loop
+        // below still performs the real validation.
+        int maxPlausibleFields = (data.Length - 36) / 36;
+        _tupdesc.EnsureCapacity(Math.Min(_tupdesc.NumFields, maxPlausibleFields));
 
         dataIdx += 36;
         for (int ix = 0; ix < _tupdesc.NumFields; ix++)
@@ -2591,11 +2778,14 @@ public sealed class NzConnection : DbConnection
 
         _tupdesc.DateStyle = IUnpack(data, dataIdx);
         _tupdesc.EuroDates = IUnpack(data, dataIdx + 4);
-        _logger?.LogDebug(
-            "RowStandard descriptor: NumFields={NumFields} MaxRecordSize={MaxRecordSize} FixedFieldsSize={FixedFieldsSize}",
-            _tupdesc.NumFields,
-            _tupdesc.MaxRecordSize,
-            _tupdesc.FixedFieldsSize);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            _logger.LogDebug(
+                "RowStandard descriptor: NumFields={NumFields} MaxRecordSize={MaxRecordSize} FixedFieldsSize={FixedFieldsSize}",
+                _tupdesc.NumFields,
+                _tupdesc.MaxRecordSize,
+                _tupdesc.FixedFieldsSize);
+
+        _tupdesc.Freeze();
     }
 
 
@@ -2604,7 +2794,7 @@ public sealed class NzConnection : DbConnection
 
     public bool UseStringPool { get; set; } = true;
 
-    private string GetStandardString(int curField, Span<byte> spanData, Encoding encoding)
+    private string GetStandardString(int curField, ReadOnlySpan<byte> spanData, Encoding encoding)
     {
         var sp = _nzCommand?.GetColumnStringPool(curField);
         if (UseStringPool && sp is not null)
@@ -2617,7 +2807,7 @@ public sealed class NzConnection : DbConnection
         }
     }
     
-    private string GetFixedLenString(int curField, Span<byte> fieldDataP, int fldlen, int cursize)
+    private string GetFixedLenString(int curField, ReadOnlySpan<byte> fieldDataP, int fldlen, int cursize)
     {
         if (fldlen < 120)
         {
@@ -2637,7 +2827,7 @@ public sealed class NzConnection : DbConnection
     }
 
     private string DecodeFixedLenString(
-        int curField, Span<byte> fieldDataP, int fldlen, int cursize, scoped Span<char> chars)
+        int curField, ReadOnlySpan<byte> fieldDataP, int fldlen, int cursize, scoped Span<char> chars)
     {
         NzConnectionHelpers.ClientEncoding.TryGetChars(fieldDataP.Slice(2, cursize), chars, out int charsRead);
         chars[charsRead..fldlen].Fill(' ');
@@ -2660,25 +2850,33 @@ public sealed class NzConnection : DbConnection
         int rowLength = ReadProtocolLength("rowStandard.rowLength");
         int payloadLength = ReadProtocolLength("rowStandard.dbosPayloadLength", allowZero: false);
 
-        _logger?.LogDebug(
-            "RowStandard payload: Row={Row} RowLength={RowLength} PayloadLength={PayloadLength} NumFields={NumFields} MaxRecordSize={MaxRecordSize}",
-            _currentProtocolRowNumber,
-            rowLength,
-            payloadLength,
-            numFields,
-            _tupdesc.MaxRecordSize);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            _logger.LogDebug(
+                "RowStandard payload: Row={Row} RowLength={RowLength} PayloadLength={PayloadLength} NumFields={NumFields} MaxRecordSize={MaxRecordSize}",
+                _currentProtocolRowNumber,
+                rowLength,
+                payloadLength,
+                numFields,
+                _tupdesc.MaxRecordSize);
 
-        RegenerateBuffer(payloadLength);
-        long payloadOffset = ProtocolReadOffset;
-        byte[] data = Read(payloadLength, _tmp_buffer);
-        _logger?.LogDebug(
-            "RowStandard payload consumed: Row={Row} OffsetStart={OffsetStart} OffsetEnd={OffsetEnd} BytesRead={BytesRead}",
-            _currentProtocolRowNumber,
-            payloadOffset,
-            ProtocolReadOffset,
-            payloadLength);
-
-        ParseDbosTupleData(nzCommand, data, numFields);
+        if (payloadLength <= _readBuffer!.Capacity)
+        {
+            // Decode in place: no per-row copy into _tmp_buffer.
+            _readBuffer.Ensure(payloadLength);
+            ParseDbosTupleData(nzCommand, _readBuffer.ReadSpan(payloadLength), numFields);
+        }
+        else
+        {
+            byte[] rented = _readBuffer.RentOversize(payloadLength);
+            try
+            {
+                ParseDbosTupleData(nzCommand, rented.AsSpan(0, payloadLength), numFields);
+            }
+            finally
+            {
+                _readBuffer.ReturnOversize(rented);
+            }
+        }
     }
 
     private async ValueTask ResReadDbosTupleAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
@@ -2693,28 +2891,40 @@ public sealed class NzConnection : DbConnection
             allowZero: false,
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        _logger?.LogDebug(
-            "RowStandard payload: Row={Row} RowLength={RowLength} PayloadLength={PayloadLength} NumFields={NumFields} MaxRecordSize={MaxRecordSize}",
-            _currentProtocolRowNumber,
-            rowLength,
-            payloadLength,
-            numFields,
-            _tupdesc.MaxRecordSize);
+        if (_logger?.IsEnabled(LogLevel.Debug) == true)
+            _logger.LogDebug(
+                "RowStandard payload: Row={Row} RowLength={RowLength} PayloadLength={PayloadLength} NumFields={NumFields} MaxRecordSize={MaxRecordSize}",
+                _currentProtocolRowNumber,
+                rowLength,
+                payloadLength,
+                numFields,
+                _tupdesc.MaxRecordSize);
 
-        RegenerateBuffer(payloadLength);
-        long payloadOffset = ProtocolReadOffset;
-        byte[] data = await ReadAsync(payloadLength, _tmp_buffer, cancellationToken).ConfigureAwait(false);
-        _logger?.LogDebug(
-            "RowStandard payload consumed: Row={Row} OffsetStart={OffsetStart} OffsetEnd={OffsetEnd} BytesRead={BytesRead}",
-            _currentProtocolRowNumber,
-            payloadOffset,
-            ProtocolReadOffset,
-            payloadLength);
-
-        ParseDbosTupleData(nzCommand, data, numFields);
+        if (payloadLength <= _readBuffer!.Capacity)
+        {
+            await _readBuffer.EnsureAsync(payloadLength, cancellationToken).ConfigureAwait(false);
+            // Span locals are not allowed in async methods on the net8 target,
+            // so decoding runs in this synchronous helper.
+            ParseCurrentDbosTuple(nzCommand, payloadLength, numFields);
+        }
+        else
+        {
+            byte[] rented = await _readBuffer.RentOversizeAsync(payloadLength, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ParseDbosTupleData(nzCommand, rented.AsSpan(0, payloadLength), numFields);
+            }
+            finally
+            {
+                _readBuffer.ReturnOversize(rented);
+            }
+        }
     }
 
-    private void ParseDbosTupleData(NzCommand nzCommand, byte[] data, int numFields)
+    private void ParseCurrentDbosTuple(NzCommand nzCommand, int payloadLength, int numFields)
+        => ParseDbosTupleData(nzCommand, _readBuffer!.ReadSpan(payloadLength), numFields);
+
+    private void ParseDbosTupleData(NzCommand nzCommand, ReadOnlySpan<byte> data, int numFields)
     {
 
         if (_row is null || _row.Length < numFields)
@@ -2724,6 +2934,8 @@ public sealed class NzConnection : DbConnection
 
         PrepareVariableFieldOffsets(data);
 
+        bool logDebug = _logger?.IsEnabled(LogLevel.Debug) == true;
+
         int fieldLf = 0;
         int curField = 0;
 
@@ -2732,7 +2944,7 @@ public sealed class NzConnection : DbConnection
             ref RowValue rowValue = ref _row[fieldLf];
             rowValue.ResetForReuse(); // Drop references retained by the previous row before reusing this slot.
             //CTableFieldAt can span be used here ? - to reduce alocation
-            Span<byte> fieldDataP = CTableFieldAt(data, curField);
+            ReadOnlySpan<byte> fieldDataP = CTableFieldAt(data, curField);
 
             //var standardImplementation = bitmap[tupdesc.FieldPhysField[fieldLf]] == 1;
             //Debug.Assert(standardImplementation == res);
@@ -2741,7 +2953,7 @@ public sealed class NzConnection : DbConnection
             if (ColumnIsNull(data, fieldLf))
             {
                 rowValue.typeCode = TypeCodeEx.Empty;
-                _logger?.LogDebug("field={Field}, value= NULL", curField + 1);
+                if (logDebug) _logger?.LogDebug("field={Field}, value= NULL", curField + 1);
                 curField += 1;
                 fieldLf += 1;
                 continue;
@@ -2752,157 +2964,195 @@ public sealed class NzConnection : DbConnection
             int fldlen = CTableIFieldSize(curField);
             int fldtype = CTableIFieldType(curField);
 
-            if (fldtype == NzTypeUnknown)
+            // Single dispatch: the previous if/else-if chain re-tested the type
+            // several times per column. Types are mutually exclusive, so a
+            // switch is equivalent and cheaper on the per-row hot path.
+            switch (fldtype)
             {
-                fldtype = NzTypeVarChar;
-            }            
-
-            if (fldtype == NzTypeChar)
-            {
-                string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding);
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                _logger?.LogDebug("field={Field}, datatype=CHAR, value={Value}", curField + 1, value);
-            }
-
-            if (fldtype == NzTypeNChar || fldtype == NzTypeNVarChar)
-            {
-                int cursize = BitConverter.ToInt16(fieldDataP) - 2;
-                string value;
-                if (fldtype == NzTypeNVarChar || fldlen == cursize)
+                case NzTypeUnknown:
+                case NzTypeVarChar:
+                case NzTypeVarFixedChar:
+                case NzTypeGeometry:
+                case NzTypeVarBinary:
+                case NzTypeJson:
+                case NzTypeJsonb:
+                case NzTypeJsonpath:
                 {
-                    value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.ClientEncoding);
+                    int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                    string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                    break;
                 }
-                else
-                {
-                    value = GetFixedLenString(curField, fieldDataP, fldlen, cursize);
-                }
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
-            }
 
-            if (fldtype == NzTypeVarChar || fldtype == NzTypeVarFixedChar || fldtype == NzTypeGeometry ||
-                fldtype == NzTypeVarBinary || fldtype == NzTypeJson || fldtype == NzTypeJsonb || fldtype == NzTypeJsonpath)
-            {
-                int cursize = BitConverter.ToInt16(fieldDataP) - 2;
-                string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
-            }
+                case NzTypeChar:
+                {
+                    string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding);
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=CHAR, value={Value}", curField + 1, value);
+                    break;
+                }
 
-            if (fldtype == NzTypeInt8)  // int64
-            {
-                long value = BitConverter.ToInt64(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Int64;
-                rowValue.int64Value = value;
-                _logger?.LogDebug("field={Field}, datatype=NzTypeInt8, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeIntvsAbsTimeFIX) //https://github.com/IBM/nzpy/issues/61 //TODO, SELECT CREATEDATE FROM SYSTEM.ADMIN._V_TABLE_STORAGE_STAT
-            {
-                DateTime value = DateTypes.TimestampRecvInt(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.DateTime;
-                rowValue.dateTimeValue = value;
-                _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeInt)  // int32
-            {
-                int value = BitConverter.ToInt32(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Int32;
-                rowValue.int32Value = value;
-                _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeInt2)  // int16
-            {
-                short value = BitConverter.ToInt16(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Int16;
-                rowValue.int16Value = value;
-                _logger?.LogDebug("field={Field}, datatype=NzTypeInt2, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeInt1)
-            {
-                //sbyte value = (sbyte)fieldDataP[0];
-                Int16 value = (Int16)(sbyte)fieldDataP[0]; // int 16 to be in pair with ODBC
-                rowValue.typeCode = TypeCodeEx.Int16; //fix to byte ? 
-                rowValue.int16Value = value;
-                _logger?.LogDebug("field={Field}, datatype=NzTypeInt1, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeDouble)
-            {
-                double value = BitConverter.ToDouble(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Double;
-                rowValue.doubleValue = value;
-                _logger?.LogDebug("field={Field}, datatype=NzTypeDouble, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeFloat)
-            {
-                float value = BitConverter.ToSingle(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Single;
-                rowValue.singleValue = value;
-                _logger?.LogDebug("field={Field}, datatype=NzTypeFloat, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeDate)
-            {
-                DateTime value = DateTypes.ToDateTimeFrom4Bytes(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.DateTime;
-                rowValue.dateTimeValue = value;
-                _logger?.LogDebug("field={Field}, datatype=DATE, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeTime)
-            {
-                TimeSpan value = DateTypes.TimeRecvFloatX2(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.TimeSpan;
-                rowValue.timeSpanValue = value;
-                _logger?.LogDebug("field={Field}, datatype=TIME, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeInterval)
-            {
-                string value = DateTypes.TimeRecvFloatX1(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                _logger?.LogDebug("field={Field}, datatype=INTERVAL, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeTimeTz) // https://www.ibm.com/docs/en/netezza?topic=tdt-time-time-zone-timetz
-            {
-                TimeSpan timeSpanVal = DateTypes.TimeRecvFloatX2(fieldDataP);
-                int timetzZone = BitConverter.ToInt32(fieldDataP.Slice(fldlen - 4));
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = DateTypes.TimetzOutTimetzadt(timeSpanVal, timetzZone);
-                //rowValue.stringValue = value.ToString();
-                _logger?.LogDebug("field={Field}, datatype=TIMETZ, value={Value}", curField + 1, rowValue.stringValue);
-            }
-            else if (fldtype == NzTypeTimestamp)
-            {
-                DateTime value = DateTypes.ToDateTimeFrom8Bytes(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.DateTime;
-                rowValue.dateTimeValue = value;
-                _logger?.LogDebug("field={Field}, datatype=TIMESTAMP, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeNumeric)
-            {
-                int prec = CTableIFieldPrecision(curField);
-                int scale = CTableIFieldScale(curField);
-                int count = CTableIFieldNumericDigit32Count(curField);
-                decimal value;
-                try
+                case NzTypeNChar:
+                case NzTypeNVarChar:
                 {
-                    value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
+                    int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                    string value;
+                    if (fldtype == NzTypeNVarChar || fldlen == cursize)
+                    {
+                        value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.ClientEncoding);
+                    }
+                    else
+                    {
+                        value = GetFixedLenString(curField, fieldDataP, fldlen, cursize);
+                    }
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                    break;
                 }
-                catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentOutOfRangeException or InvalidCastException)
+
+                case NzTypeInt8:  // int64
                 {
-                    throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
+                    long value = BitConverter.ToInt64(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Int64;
+                    rowValue.int64Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt8, value={Value}", curField + 1, value);
+                    break;
                 }
-                rowValue.typeCode = TypeCodeEx.Decimal;
-                rowValue.decimalValue = value;
-                _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, value);
-            }
-            else if (fldtype == NzTypeBool)
-            {
-                bool value = fieldDataP[0] == 0x01;
-                rowValue.typeCode = TypeCodeEx.Boolean;
-                rowValue.boolValue = value;
-                _logger?.LogDebug("field={Field}, datatype=BOOL, value={Value}", curField + 1, value);
+
+                case NzTypeIntvsAbsTimeFIX: //https://github.com/IBM/nzpy/issues/61 //TODO, SELECT CREATEDATE FROM SYSTEM.ADMIN._V_TABLE_STORAGE_STAT
+                {
+                    DateTime value = DateTypes.TimestampRecvInt(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.DateTime;
+                    rowValue.dateTimeValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeInt:  // int32
+                {
+                    int value = BitConverter.ToInt32(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Int32;
+                    rowValue.int32Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeInt2:  // int16
+                {
+                    short value = BitConverter.ToInt16(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Int16;
+                    rowValue.int16Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt2, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeInt1:
+                {
+                    //sbyte value = (sbyte)fieldDataP[0];
+                    Int16 value = (Int16)(sbyte)fieldDataP[0]; // int 16 to be in pair with ODBC
+                    rowValue.typeCode = TypeCodeEx.Int16; //fix to byte ? 
+                    rowValue.int16Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt1, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeDouble:
+                {
+                    double value = BitConverter.ToDouble(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Double;
+                    rowValue.doubleValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeDouble, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeFloat:
+                {
+                    float value = BitConverter.ToSingle(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Single;
+                    rowValue.singleValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeFloat, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeDate:
+                {
+                    DateTime value = DateTypes.ToDateTimeFrom4Bytes(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.DateTime;
+                    rowValue.dateTimeValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=DATE, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeTime:
+                {
+                    TimeSpan value = DateTypes.TimeRecvFloatX2(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.TimeSpan;
+                    rowValue.timeSpanValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIME, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeInterval:
+                {
+                    string value = DateTypes.TimeRecvFloatX1(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=INTERVAL, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeTimeTz: // https://www.ibm.com/docs/en/netezza?topic=tdt-time-time-zone-timetz
+                {
+                    TimeSpan timeSpanVal = DateTypes.TimeRecvFloatX2(fieldDataP);
+                    int timetzZone = BitConverter.ToInt32(fieldDataP.Slice(fldlen - 4));
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = DateTypes.TimetzOutTimetzadt(timeSpanVal, timetzZone);
+                    //rowValue.stringValue = value.ToString();
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMETZ, value={Value}", curField + 1, rowValue.stringValue);
+                    break;
+                }
+
+                case NzTypeTimestamp:
+                {
+                    DateTime value = DateTypes.ToDateTimeFrom8Bytes(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.DateTime;
+                    rowValue.dateTimeValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMESTAMP, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeNumeric:
+                {
+                    int prec = CTableIFieldPrecision(curField);
+                    int scale = CTableIFieldScale(curField);
+                    int count = CTableIFieldNumericDigit32Count(curField);
+                    decimal value;
+                    try
+                    {
+                        value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
+                    }
+                    catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentOutOfRangeException or InvalidCastException)
+                    {
+                        throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
+                    }
+                    rowValue.typeCode = TypeCodeEx.Decimal;
+                    rowValue.decimalValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, value);
+                    break;
+                }
+
+                case NzTypeBool:
+                {
+                    bool value = fieldDataP[0] == 0x01;
+                    rowValue.typeCode = TypeCodeEx.Boolean;
+                    rowValue.boolValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=BOOL, value={Value}", curField + 1, value);
+                    break;
+                }
             }
 
             curField += 1;
@@ -2926,9 +3176,9 @@ public sealed class NzConnection : DbConnection
         }
     }
 
-    private bool ColumnIsNull(byte[] data, int fieldLf)
+    private bool ColumnIsNull(ReadOnlySpan<byte> data, int fieldLf)
     {
-        var decodedColumnNumber = _tupdesc.FieldPhysField[fieldLf];
+        var decodedColumnNumber = _tupdesc.FieldPhysFieldArr[fieldLf];
         byte numberToTest = data[2 + decodedColumnNumber / 8];
         var numberOfBitToCheck = decodedColumnNumber % 8;
         var columnIsNull = (numberToTest & (1 << numberOfBitToCheck)) != 0;
@@ -2937,12 +3187,12 @@ public sealed class NzConnection : DbConnection
 
     private int CTableIFieldPrecision(int coldex)
     {
-        return ((_tupdesc.FieldSize[coldex] >> 8) & 0x7F);
+        return ((_tupdesc.FieldSizeArr[coldex] >> 8) & 0x7F);
     }
 
     internal int CTableIFieldScale(int coldex)
     {
-        return (_tupdesc.FieldSize[coldex] & 0x00FF);
+        return (_tupdesc.FieldSizeArr[coldex] & 0x00FF);
     }
     internal int CTableIFieldScaleAlternative(int coldex)
     {
@@ -2992,37 +3242,37 @@ public sealed class NzConnection : DbConnection
     private int CTableIFieldNumericDigit32Count(int coldex)
     {
         int sizeTNumericDigit = 4;
-        return _tupdesc.FieldTrueSize[coldex] / sizeTNumericDigit;
+        return _tupdesc.FieldTrueSizeArr[coldex] / sizeTNumericDigit;
     }
     internal bool IsExtendedRowDescriptionAvaiable() => _tupdesc is not null;
 
 
     private int CTableIFieldType(int curField)
     {
-        return _tupdesc.FieldType[curField];
+        return _tupdesc.FieldTypeArr[curField];
     }
 
     private int CTableIFieldSize(int curField)
     {
-        return _tupdesc.FieldSize[curField];
+        return _tupdesc.FieldSizeArr[curField];
     }
 
     private int[] _variableFieldOffsets = Array.Empty<int>();
     private int _variableFieldOffsetCount;
 
-    private Span<byte> CTableFieldAt(byte[] data, int curField)
+    private ReadOnlySpan<byte> CTableFieldAt(ReadOnlySpan<byte> data, int curField)
     {
-        if (_tupdesc.FieldFixedSize[curField] != 0)
+        if (_tupdesc.FieldFixedSizeArr[curField] != 0)
         {
-            return CTableIFixedFieldPtr(data, _tupdesc.FieldOffset[curField]);
+            return CTableIFixedFieldPtr(data, _tupdesc.FieldOffsetArr[curField]);
         }
 
-        int variableOrdinal = _tupdesc.FieldOffset[curField];
+        int variableOrdinal = _tupdesc.FieldOffsetArr[curField];
         if ((uint)variableOrdinal >= (uint)_variableFieldOffsetCount)
         {
             throw new InvalidDataException($"Invalid varying-field offset {variableOrdinal} for column {curField + 1}.");
         }
-        return data.AsSpan()[_variableFieldOffsets[variableOrdinal]..];
+        return data[_variableFieldOffsets[variableOrdinal]..];
     }
 
     internal static void FillVariableFieldOffsets(ReadOnlySpan<byte> data, int fixedOffset, Span<int> offsets)
@@ -3049,7 +3299,7 @@ public sealed class NzConnection : DbConnection
         }
     }
 
-    private void PrepareVariableFieldOffsets(byte[] data)
+    private void PrepareVariableFieldOffsets(ReadOnlySpan<byte> data)
     {
         int count = _tupdesc.NumVaryingFields ?? 0;
         if (count < 0)
@@ -3062,9 +3312,9 @@ public sealed class NzConnection : DbConnection
             FillVariableFieldOffsets(data, _tupdesc.FixedFieldsSize, _variableFieldOffsets.AsSpan(0, count));
     }
 
-    private static Span<byte> CTableIFixedFieldPtr(byte[] data, int offset)
+    private static ReadOnlySpan<byte> CTableIFixedFieldPtr(ReadOnlySpan<byte> data, int offset)
     {
-        return data.AsSpan()[offset..];
+        return data[offset..];
     }
 
     //only for system tabeles  + selects without from ? -> "SELECT * FROM _V_TABLE"  or "SELECT 123"
@@ -3264,7 +3514,7 @@ public sealed class NzConnection : DbConnection
         //    }
         //}
     }
-    private static void HandleRowDescription(byte[] data, NzCommand nzCommand)
+    private void HandleRowDescription(byte[] data, NzCommand nzCommand)
     {
         int count = HUnpack(data);
         int idx = 2;
@@ -3290,7 +3540,7 @@ public sealed class NzConnection : DbConnection
                 DataFormat = format,
                 //CalculationFunc = receiver
             };
-            if (fieldNew.Type == typeof(string))
+            if (UseStringPool && fieldNew.Type == typeof(string))
             {
                 fieldNew.StringPool = new Sylvan();
             }
@@ -3331,6 +3581,27 @@ public sealed class NzConnection : DbConnection
         {
             return BitConverter.ToInt16(data, offset);
         }
+    }
+
+    private static int IUnpack(ReadOnlySpan<byte> data, int offset = 0)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            return (data[offset] << 24) | (data[offset + 1] << 16) |
+                   (data[offset + 2] << 8) | data[offset + 3];
+        }
+
+        return BitConverter.ToInt32(data[offset..]);
+    }
+
+    private static short HUnpack(ReadOnlySpan<byte> data, int offset = 0)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            return (short)((data[offset] << 8) | data[offset + 1]);
+        }
+
+        return BitConverter.ToInt16(data[offset..]);
     }
 
     //private (byte messageCode, int dataLen) CiUnpack(byte[] data)
@@ -3445,6 +3716,8 @@ public sealed class NzConnection : DbConnection
 
     public override void Close()
     {
+        _readBuffer?.Dispose();
+        _readBuffer = null;
         _stream?.Dispose();
         _stream = null!;
 
@@ -3457,10 +3730,14 @@ public sealed class NzConnection : DbConnection
             ArrayPool<byte>.Shared.Return(_tmp_buffer);
             _tmp_buffer = [];
         }
+        _cachedTimeoutCts?.Dispose();
+        _cachedTimeoutCts = null;
     }
 
     public override async Task CloseAsync()
     {
+        _readBuffer?.Dispose();
+        _readBuffer = null;
         if (_stream is not null)
         {
             await _stream.DisposeAsync().ConfigureAwait(false);
@@ -3477,6 +3754,8 @@ public sealed class NzConnection : DbConnection
             ArrayPool<byte>.Shared.Return(_tmp_buffer);
             _tmp_buffer = [];
         }
+        _cachedTimeoutCts?.Dispose();
+        _cachedTimeoutCts = null;
     }
 
     private NzCommand _nzCommand = null!;
@@ -3507,7 +3786,7 @@ public sealed class NzConnection : DbConnection
     {
         Open(ClientTypeId.SqlDotnet);
     }
-    public void Open(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, bool useBufferedStream = true, bool setSocketBufferSizes = false)
+    public void Open(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, bool useBufferedStream = false, bool setSocketBufferSizes = false)
     {
         if (_tmp_buffer.Length == 0)
         {
@@ -3524,7 +3803,9 @@ public sealed class NzConnection : DbConnection
 
         if (response is not null)
         {
-            _stream = new ProtocolCountingStream(response);
+            _stream = response;
+            _readBuffer?.Dispose();
+            _readBuffer = new NzReadBuffer(_stream);
             _protocolFaulted = false;
             _protocolRowNumber = 0;
             _currentProtocolRowNumber = 0;
@@ -3551,7 +3832,7 @@ public sealed class NzConnection : DbConnection
         return OpenAsync(ClientTypeId.SqlDotnet, cancellationToken);
     }
 
-    public async Task OpenAsync(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, CancellationToken cancellationToken = default, bool useBufferedStream = true, bool setSocketBufferSizes = false)
+    public async Task OpenAsync(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, CancellationToken cancellationToken = default, bool useBufferedStream = false, bool setSocketBufferSizes = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (_tmp_buffer.Length == 0)
@@ -3569,7 +3850,9 @@ public sealed class NzConnection : DbConnection
 
         if (response is not null)
         {
-            _stream = new ProtocolCountingStream(response);
+            _stream = response;
+            _readBuffer?.Dispose();
+            _readBuffer = new NzReadBuffer(_stream);
             _protocolFaulted = false;
             _protocolRowNumber = 0;
             _currentProtocolRowNumber = 0;

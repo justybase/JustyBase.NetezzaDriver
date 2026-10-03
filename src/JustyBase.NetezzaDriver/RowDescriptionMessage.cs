@@ -15,7 +15,7 @@ internal sealed class RowDescriptionMessage
     public RowDescriptionMessage(int numFields)
     {
         _fields = new FieldDescription[numFields];
-        _nameIndex = new Dictionary<string, int>();
+        _nameIndex = new Dictionary<string, int>(numFields);
     }
     public FieldDescription this[int ordinal]
     {
@@ -38,7 +38,13 @@ internal sealed class FieldDescription
     public byte DataFormat { get; set; }
 
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
-    public Type Type => TypeOID switch
+    private Type? _resolvedType;
+
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
+    public Type Type => _resolvedType ??= ResolveType();
+
+    [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
+    private Type ResolveType() => TypeOID switch
     {
         16 => typeof(bool), // Boolean
         17 => typeof(string), // SELECT * FROM SYSTEM.ADMIN._T_PROC ORDER BY ROWID LIMIT 500

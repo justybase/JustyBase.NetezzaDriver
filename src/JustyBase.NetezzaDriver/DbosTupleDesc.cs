@@ -128,4 +128,49 @@ internal sealed class DbosTupleDesc
         FieldFixedSize = new List<int>();
         FieldSpringField = new List<int>();
     }
+
+    /// <summary>
+    /// Pre-sizes the per-field lists once the field count is known, avoiding
+    /// repeated reallocations while parsing the descriptor (9 Add calls per field).
+    /// </summary>
+    internal void EnsureCapacity(int capacity)
+    {
+        if (capacity <= 0)
+            return;
+        FieldType.EnsureCapacity(capacity);
+        FieldSize.EnsureCapacity(capacity);
+        FieldTrueSize.EnsureCapacity(capacity);
+        FieldOffset.EnsureCapacity(capacity);
+        FieldPhysField.EnsureCapacity(capacity);
+        FieldLogField.EnsureCapacity(capacity);
+        FieldNullAllowed.EnsureCapacity(capacity);
+        FieldFixedSize.EnsureCapacity(capacity);
+        FieldSpringField.EnsureCapacity(capacity);
+    }
+
+    // Flat arrays used by the per-row decode hot path. List<T> indexers add a
+    // bounds check plus an indirection per field per row; arrays remove the
+    // indirection. Populated once by Freeze() after the descriptor is parsed.
+    internal int[] FieldTypeArr { get; private set; } = [];
+    internal int[] FieldSizeArr { get; private set; } = [];
+    internal int[] FieldTrueSizeArr { get; private set; } = [];
+    internal int[] FieldOffsetArr { get; private set; } = [];
+    internal int[] FieldPhysFieldArr { get; private set; } = [];
+    internal bool[] FieldNullAllowedArr { get; private set; } = [];
+    internal int[] FieldFixedSizeArr { get; private set; } = [];
+
+    /// <summary>
+    /// Materializes the hot-path arrays from the parsed lists. Must be called
+    /// after the row descriptor has been fully read.
+    /// </summary>
+    internal void Freeze()
+    {
+        FieldTypeArr = FieldType.ToArray();
+        FieldSizeArr = FieldSize.ToArray();
+        FieldTrueSizeArr = FieldTrueSize.ToArray();
+        FieldOffsetArr = FieldOffset.ToArray();
+        FieldPhysFieldArr = FieldPhysField.ToArray();
+        FieldNullAllowedArr = FieldNullAllowed.ToArray();
+        FieldFixedSizeArr = FieldFixedSize.ToArray();
+    }
 }

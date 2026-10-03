@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\JustyBase.NetezzaDriver\JustyBase.NetezzaDriver.csproj" />
+    <ProjectReference Include="..\JustyBase.NetezzaDriver.TestSupport\JustyBase.NetezzaDriver.TestSupport.csproj" />
   </ItemGroup>
 
 </Project>

@@ -45,6 +45,13 @@
 #*.gif   binary
 
 ###############################################################################
+# Binary test fixtures - must not be normalized or diffed.
+# Overrides '* text=auto' above: CRLF conversion would corrupt gzip.
+###############################################################################
+*.nzreplay.gz binary linguist-generated
+*.nzreplay binary linguist-generated
+
+###############################################################################
 # diff behavior for common document formats
 # 
 # Convert binary document formats to text before diffing them. This feature
