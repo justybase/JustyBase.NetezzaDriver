@@ -55,6 +55,16 @@ public sealed class NzParameter : DbParameter
         }
     }
 
+    internal ReadOnlySpan<char> GetResolvedNameSpan()
+    {
+        var name = _parameterName;
+        if (string.IsNullOrEmpty(name))
+            return ReadOnlySpan<char>.Empty;
+        if (name[0] == ':' || name[0] == '@')
+            return name.AsSpan(1);
+        return name.AsSpan();
+    }
+
     [AllowNull]
     public override string ParameterName
     {
@@ -141,6 +151,109 @@ public sealed class NzParameter : DbParameter
     internal string ToSqlLiteral()
     {
         return ValueToSqlLiteral(_value);
+    }
+
+    internal void AppendSqlLiteral(System.Text.StringBuilder sb)
+    {
+        var value = _value;
+        if (value is null || value is DBNull)
+        {
+            sb.Append("NULL");
+            return;
+        }
+
+        switch (value)
+        {
+            case bool b:
+                sb.Append(b ? "TRUE" : "FALSE");
+                return;
+            case int i:
+                sb.Append(i.ToString(CultureInfo.InvariantCulture));
+                return;
+            case long l:
+                sb.Append(l.ToString(CultureInfo.InvariantCulture));
+                return;
+            case short s:
+                sb.Append(s.ToString(CultureInfo.InvariantCulture));
+                return;
+            case byte bt:
+                sb.Append(bt.ToString(CultureInfo.InvariantCulture));
+                return;
+            case sbyte sbv:
+                sb.Append(sbv.ToString(CultureInfo.InvariantCulture));
+                return;
+            case ushort us:
+                sb.Append(us.ToString(CultureInfo.InvariantCulture));
+                return;
+            case uint ui:
+                sb.Append(ui.ToString(CultureInfo.InvariantCulture));
+                return;
+            case ulong ul:
+                sb.Append(ul.ToString(CultureInfo.InvariantCulture));
+                return;
+            case string str:
+                AppendStringLiteral(sb, str);
+                return;
+            case char c:
+                AppendStringLiteral(sb, c.ToString());
+                return;
+            case byte[] bytes:
+                sb.Append("x'");
+                foreach (var b in bytes)
+                    sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                sb.Append('\'');
+                return;
+            case float f:
+                sb.Append(f.ToString("G", CultureInfo.InvariantCulture));
+                return;
+            case double d:
+                sb.Append(d.ToString("G", CultureInfo.InvariantCulture));
+                return;
+            case decimal m:
+                sb.Append(m.ToString(CultureInfo.InvariantCulture));
+                return;
+            case DateTime dt:
+                sb.Append('\'');
+                sb.Append(dt.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture));
+                sb.Append('\'');
+                return;
+            case DateOnly d:
+                sb.Append('\'');
+                sb.Append(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                sb.Append('\'');
+                return;
+            case TimeOnly t:
+                sb.Append('\'');
+                sb.Append(t.ToString("HH:mm:ss", CultureInfo.InvariantCulture));
+                sb.Append('\'');
+                return;
+            case TimeSpan ts:
+                sb.Append('\'');
+                sb.Append(ts.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture));
+                sb.Append('\'');
+                return;
+            case Guid g:
+                sb.Append('\'');
+                sb.Append(g.ToString("D"));
+                sb.Append('\'');
+                return;
+            default:
+                AppendStringLiteral(sb, value.ToString() ?? string.Empty);
+                return;
+        }
+    }
+
+    private static void AppendStringLiteral(System.Text.StringBuilder sb, string s)
+    {
+        sb.Append('\'');
+        foreach (char c in s)
+        {
+            if (c == '\'')
+                sb.Append("''");
+            else
+                sb.Append(c);
+        }
+        sb.Append('\'');
     }
 
     internal static string ValueToSqlLiteral(object? value)

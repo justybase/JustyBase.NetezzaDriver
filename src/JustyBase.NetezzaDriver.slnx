@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="JustyBase.NetezzaDriver.Benchmarks/JustyBase.NetezzaDriver.Benchmarks.csproj" />
   <Project Path="JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj" />
+  <Project Path="JustyBase.NetezzaDriver.TestSupport/JustyBase.NetezzaDriver.TestSupport.csproj" />
   <Project Path="JustyBase.NetezzaDriver/JustyBase.NetezzaDriver.csproj" />
 </Solution>

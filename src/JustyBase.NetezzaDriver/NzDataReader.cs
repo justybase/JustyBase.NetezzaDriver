@@ -35,6 +35,9 @@ public sealed class NzDataReader : DbDataReader
         }
     }
 
+    internal static NzDataReader CreateForTests(NzCommand nzCommand)
+        => new(nzCommand, initializeReader: false);
+
     internal static async Task<NzDataReader> CreateAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
         var reader = new NzDataReader(nzCommand, initializeReader: false);
@@ -445,11 +448,63 @@ public sealed class NzDataReader : DbDataReader
         if (buffer != null && bufferOffset < 0) throw new ArgumentOutOfRangeException(nameof(bufferOffset));
         if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
 
-        var value = GetValue(ordinal);
-        if (value is DBNull)
-        {
+        ref readonly var rw = ref _nzCommand.GetValue(ordinal);
+        if (rw.typeCode == TypeCodeEx.DBNull || rw.typeCode == TypeCodeEx.Empty)
             return 0;
+
+        // Fast path for the overwhelmingly common string representation.
+        // Avoids boxing via GetValue(). Zero temp allocation when the whole
+        // value fits in the caller's buffer; pooled temp otherwise with
+        // byte-exact slicing semantics preserved.
+        if (rw.typeCode == TypeCodeEx.String)
+        {
+            string text = rw.stringValue ?? string.Empty;
+            var encoding = NzConnectionHelpers.ClientEncoding;
+
+            if (buffer is null)
+                return encoding.GetByteCount(text);
+
+            if (bufferOffset > buffer.Length)
+                throw new ArgumentOutOfRangeException(nameof(bufferOffset));
+            if (length > buffer.Length - bufferOffset)
+                throw new ArgumentException("The sum of bufferOffset and length is larger than the buffer size.");
+
+            int totalBytes = encoding.GetByteCount(text);
+            if (dataOffset >= totalBytes)
+                return 0;
+
+            // Zero-alloc direct encode only when dataOffset==0 and the whole
+            // value fits. This is the common full-read case and is byte-exact.
+            if (dataOffset == 0 && length >= totalBytes)
+            {
+                return encoding.GetBytes(text.AsSpan(), buffer.AsSpan(bufferOffset, totalBytes));
+            }
+
+            // Chunked / offset reads: encode once into a pooled buffer and
+            // slice bytes exactly (preserves legacy mid-char split semantics).
+            // Rent is returned immediately; no per-call Gen0 byte[].
+            byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(totalBytes);
+            try
+            {
+                int encoded = encoding.GetBytes(text.AsSpan(), rented.AsSpan(0, totalBytes));
+                int availInner = encoded - (int)dataOffset;
+                if (availInner <= 0)
+                    return 0;
+                int copyInner = Math.Min(length, availInner);
+                rented.AsSpan((int)dataOffset, copyInner).CopyTo(buffer.AsSpan(bufferOffset, copyInner));
+                return copyInner;
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            }
         }
+
+        // Non-string: preserve legacy semantics (byte[] branch is currently dead
+        // because RowValue never stores byte[], but keep it for compat).
+        var value = rw.GetValue();
+        if (value is DBNull)
+            return 0;
 
         byte[] source = value switch
         {
@@ -493,17 +548,51 @@ public sealed class NzDataReader : DbDataReader
         if (buffer != null && bufferOffset < 0) throw new ArgumentOutOfRangeException(nameof(bufferOffset));
         if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
 
-        var value = GetValue(ordinal);
-        if (value is DBNull)
-        {
+        ref readonly var rw = ref _nzCommand.GetValue(ordinal);
+        if (rw.typeCode == TypeCodeEx.DBNull || rw.typeCode == TypeCodeEx.Empty)
             return 0;
+
+        // Fast path: string stored inline, no boxing, no intermediate.
+        if (rw.typeCode == TypeCodeEx.String)
+        {
+            string text = rw.stringValue ?? string.Empty;
+            if (buffer is null)
+                return text.Length;
+            if (bufferOffset > buffer.Length)
+                throw new ArgumentOutOfRangeException(nameof(bufferOffset));
+            if (length > buffer.Length - bufferOffset)
+                throw new ArgumentException("The sum of bufferOffset and length is larger than the buffer size.");
+            if (dataOffset >= text.Length)
+                return 0;
+            int availStr = text.Length - (int)dataOffset;
+            int copyStr = Math.Min(length, availStr);
+            text.AsSpan((int)dataOffset, copyStr).CopyTo(buffer.AsSpan(bufferOffset, copyStr));
+            return copyStr;
         }
 
-        string source = value switch
+        // Typed ToString without boxing the value first (one string alloc,
+        // unavoidable to represent numerics/dates as chars).
+        string source = rw.typeCode switch
         {
-            string text => text,
-            char[] chars => new string(chars),
-            _ => Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty
+            TypeCodeEx.Boolean => rw.boolValue.ToString(),
+            TypeCodeEx.Char => rw.charValue.ToString(),
+            TypeCodeEx.SByte => rw.sbyteValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.Byte => rw.byteValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.Int16 => rw.int16Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.UInt16 => rw.uint16Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.Int32 => rw.int32Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.UInt32 => rw.uint32Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.Int64 => rw.int64Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.UInt64 => rw.uint64Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.Single => rw.singleValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.Double => rw.doubleValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.Decimal => rw.decimalValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.DateTime => rw.dateTimeValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            TypeCodeEx.TimeSpan => rw.timeSpanValue.ToString(),
+            TypeCodeEx.Object => rw.objectValue is char[] chars
+                ? new string(chars)
+                : Convert.ToString(rw.objectValue, System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
+            _ => Convert.ToString(rw.GetValue(), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty
         };
 
         if (buffer is null)
@@ -589,7 +678,99 @@ public sealed class NzDataReader : DbDataReader
     public override T GetFieldValue<T>(int ordinal)
     {
         ValidateOrdinal(ordinal);
-        return (T)GetValue(ordinal);
+        ref readonly var rw = ref _nzCommand.GetValue(ordinal);
+
+        // Fast path: DBNull/Empty always goes through GetValue() to preserve
+        // exact ADO.NET cast semantics ((T)DBNull.Value).
+        if (rw.typeCode == TypeCodeEx.DBNull || rw.typeCode == TypeCodeEx.Empty)
+            return (T)rw.GetValue();
+
+        // Value-type fast paths use Unsafe.As to avoid boxing to object.
+        // Each branch checks the stored TypeCodeEx so mismatched casts fall
+        // through to the slow path which throws the same InvalidCastException
+        // as before.
+        if (typeof(T) == typeof(bool))
+        {
+            if (rw.typeCode == TypeCodeEx.Boolean)
+                return Unsafe.As<bool, T>(ref Unsafe.AsRef(in rw.boolValue));
+        }
+        else if (typeof(T) == typeof(byte))
+        {
+            if (rw.typeCode == TypeCodeEx.Byte)
+                return Unsafe.As<byte, T>(ref Unsafe.AsRef(in rw.byteValue));
+        }
+        else if (typeof(T) == typeof(sbyte))
+        {
+            if (rw.typeCode == TypeCodeEx.SByte)
+                return Unsafe.As<sbyte, T>(ref Unsafe.AsRef(in rw.sbyteValue));
+        }
+        else if (typeof(T) == typeof(char))
+        {
+            if (rw.typeCode == TypeCodeEx.Char)
+                return Unsafe.As<char, T>(ref Unsafe.AsRef(in rw.charValue));
+        }
+        else if (typeof(T) == typeof(short))
+        {
+            if (rw.typeCode == TypeCodeEx.Int16)
+                return Unsafe.As<short, T>(ref Unsafe.AsRef(in rw.int16Value));
+        }
+        else if (typeof(T) == typeof(ushort))
+        {
+            if (rw.typeCode == TypeCodeEx.UInt16)
+                return Unsafe.As<ushort, T>(ref Unsafe.AsRef(in rw.uint16Value));
+        }
+        else if (typeof(T) == typeof(int))
+        {
+            if (rw.typeCode == TypeCodeEx.Int32)
+                return Unsafe.As<int, T>(ref Unsafe.AsRef(in rw.int32Value));
+        }
+        else if (typeof(T) == typeof(uint))
+        {
+            if (rw.typeCode == TypeCodeEx.UInt32)
+                return Unsafe.As<uint, T>(ref Unsafe.AsRef(in rw.uint32Value));
+        }
+        else if (typeof(T) == typeof(long))
+        {
+            if (rw.typeCode == TypeCodeEx.Int64)
+                return Unsafe.As<long, T>(ref Unsafe.AsRef(in rw.int64Value));
+        }
+        else if (typeof(T) == typeof(ulong))
+        {
+            if (rw.typeCode == TypeCodeEx.UInt64)
+                return Unsafe.As<ulong, T>(ref Unsafe.AsRef(in rw.uint64Value));
+        }
+        else if (typeof(T) == typeof(float))
+        {
+            if (rw.typeCode == TypeCodeEx.Single)
+                return Unsafe.As<float, T>(ref Unsafe.AsRef(in rw.singleValue));
+        }
+        else if (typeof(T) == typeof(double))
+        {
+            if (rw.typeCode == TypeCodeEx.Double)
+                return Unsafe.As<double, T>(ref Unsafe.AsRef(in rw.doubleValue));
+        }
+        else if (typeof(T) == typeof(decimal))
+        {
+            if (rw.typeCode == TypeCodeEx.Decimal)
+                return Unsafe.As<decimal, T>(ref Unsafe.AsRef(in rw.decimalValue));
+        }
+        else if (typeof(T) == typeof(DateTime))
+        {
+            if (rw.typeCode == TypeCodeEx.DateTime)
+                return Unsafe.As<DateTime, T>(ref Unsafe.AsRef(in rw.dateTimeValue));
+        }
+        else if (typeof(T) == typeof(TimeSpan))
+        {
+            if (rw.typeCode == TypeCodeEx.TimeSpan)
+                return Unsafe.As<TimeSpan, T>(ref Unsafe.AsRef(in rw.timeSpanValue));
+        }
+        else if (typeof(T) == typeof(string))
+        {
+            if (rw.typeCode == TypeCodeEx.String)
+                return Unsafe.As<string, T>(ref Unsafe.AsRef(in rw.stringValue!));
+        }
+
+        return (T)rw.GetValue();
     }
 
     public override bool NextResult()
