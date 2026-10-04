@@ -426,6 +426,30 @@ public class PoolUnitTests
     }
 
     [Fact]
+    public async Task ConcurrentDisposeAsync_AllAwaitFullTeardown_ExactlyOnce()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, 2, 30, 0);
+        var connection = new NzConnection("user", "pass", "host", "db");
+        pool.TrackActiveForTests(connection);
+        Assert.Equal(1, pool.TotalConnections);
+
+        // Eight concurrent disposers must share one teardown: all complete
+        // only after full close, teardown runs once, counters balance.
+        var tasks = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+        {
+            await pool.DisposeAsync().ConfigureAwait(false);
+        })).ToArray();
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(1, pool.DisposeCoreRunCount);
+        Assert.Equal(0, pool.TotalConnections);
+        Assert.Equal(0, pool.ActiveCount);
+        Assert.Equal(0, pool.IdleCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => pool.RentAsync());
+        connection.Dispose();
+    }
+
+    [Fact]
     public void ConnectionSlotReservation_CapsAtMaxPoolSize()
     {
         var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, 3, 30, 0);

@@ -20,16 +20,21 @@ public sealed class NzConnectionPool : IAsyncDisposable
     private readonly TimeSpan _maxLifetime;
     private readonly TimeSpan _validationInterval;
     private readonly SemaphoreSlim _semaphore;
-    // Guards only the multi-step maintenance/clear drains that dequeue and may
-    // re-enqueue. Rent/return use ConcurrentQueue atomically without this lock.
+    // Serializes queue teardown (clear/dispose) against the return path's
+    // enqueue section. Rent dequeues lock-free; maintenance drains under it.
     private readonly SemaphoreSlim _idleLock = new(1, 1);
     private readonly ConcurrentQueue<IdleConnection> _idle = new();
-    private readonly ConcurrentDictionary<int, NzConnection> _active = new();
+    // Keyed by reference: backend Pids are not guaranteed unique (replay/fake
+    // connections all report -1), and each physical connection must own its
+    // count slot independently for exact total accounting.
+    private readonly ConcurrentDictionary<NzConnection, byte> _active = new();
     private readonly CancellationTokenSource _disposeCts = new();
     private int _totalConnections;
     private long _connectionValidationCount;
     private bool _disposed;
     private readonly object _disposeLock = new();
+    private Task? _disposeTask;
+    internal int DisposeCoreRunCount;
     private readonly Task _maintenanceTask;
 
     public NzConnectionPool(string host, string database, string user, string password,
@@ -83,7 +88,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
     internal void TrackActiveForTests(NzConnection connection)
     {
         if (TryReserveConnectionSlot())
-            _active.TryAdd(connection.Pid, connection);
+            _active.TryAdd(connection, 0);
     }
 
     internal bool ShouldValidateIdleConnection(DateTime returnedAtUtc, DateTime nowUtc)
@@ -98,10 +103,17 @@ public sealed class NzConnectionPool : IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
+        // Linked with the pool lifetime: a proven .NET gotcha is that
+        // SemaphoreSlim.Dispose() never completes a parked WaitAsync waiter,
+        // so a rent parked on the semaphore during teardown would hang
+        // forever. The linked token wakes it with OCE instead.
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCts.Token);
+        var rentToken = linkedCts.Token;
+
         bool permitAcquired = false;
         try
         {
-            await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await _semaphore.WaitAsync(rentToken).ConfigureAwait(false);
             permitAcquired = true;
             if (_disposed)
                 throw new ObjectDisposedException(GetType().FullName);
@@ -118,9 +130,9 @@ public sealed class NzConnectionPool : IAsyncDisposable
                     bool isValid;
                     try
                     {
-                        isValid = !needsValidation || await IsConnectionValidAsync(candidate, cancellationToken).ConfigureAwait(false);
+                        isValid = !needsValidation || await IsConnectionValidAsync(candidate, rentToken).ConfigureAwait(false);
                     }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    catch (OperationCanceledException) when (rentToken.IsCancellationRequested)
                     {
                         await DisposeConnectionAsync(candidate).ConfigureAwait(false);
                         Interlocked.Decrement(ref _totalConnections);
@@ -129,8 +141,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
                     if (isValid)
                     {
-                        var pid = candidate.Pid;
-                        _active.TryAdd(pid, candidate);
+                        _active.TryAdd(candidate, 0);
                         return new PooledNzConnection(candidate, this);
                     }
                     await DisposeConnectionAsync(candidate).ConfigureAwait(false);
@@ -147,22 +158,21 @@ public sealed class NzConnectionPool : IAsyncDisposable
                 // retry instead of overshooting.
                 if (!TryReserveConnectionSlot())
                 {
-                    await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(10, rentToken).ConfigureAwait(false);
                     continue;
                 }
 
                 NzConnection connection;
                 try
                 {
-                    connection = await CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
+                    connection = await CreateConnectionAsync(rentToken).ConfigureAwait(false);
                 }
                 catch
                 {
                     ReleaseReservation();
                     throw;
                 }
-                var connectionPid = connection.Pid;
-                _active.TryAdd(connectionPid, connection);
+                _active.TryAdd(connection, 0);
                 return new PooledNzConnection(connection, this);
             }
         }
@@ -211,8 +221,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
     internal async Task ReturnAsync(NzConnection connection)
     {
-        var pid = connection.Pid;
-        bool removed = _active.TryRemove(pid, out _);
+        bool removed = _active.TryRemove(connection, out _);
         if (_disposed)
         {
             // Pool is dead: close the connection, balance the count only for
@@ -260,8 +269,18 @@ public sealed class NzConnectionPool : IAsyncDisposable
         {
             try
             {
-                await _idleLock.WaitAsync().ConfigureAwait(false);
+                // Same parked-waiter gotcha as the semaphore: the dispose
+                // token wakes the wait with OCE instead of hanging it.
+                // Either signal means the pool is dying: close directly.
+                await _idleLock.WaitAsync(_disposeCts.Token).ConfigureAwait(false);
                 lockAcquired = true;
+            }
+            catch (OperationCanceledException) when (_disposed)
+            {
+                await DisposeConnectionAsync(connection).ConfigureAwait(false);
+                if (removed)
+                    Interlocked.Decrement(ref _totalConnections);
+                return;
             }
             catch (ObjectDisposedException)
             {
@@ -389,12 +408,15 @@ public sealed class NzConnectionPool : IAsyncDisposable
         int processed = 0;
         const int maxProcessPerCycle = 1000;
 
+        // Cancellation may only prevent *starting* the drain (the WaitAsync
+        // above). Once an entry is dequeued it is settled synchronously below
+        // with no further cancellation points, so a cancelled token can never
+        // leave a connection without an owner (neither requeued nor disposed).
         await _idleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             while (processed < maxProcessPerCycle && _idle.TryDequeue(out var idleEntry))
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 var conn = idleEntry.Connection;
                 if (conn.State != System.Data.ConnectionState.Open || IsConnectionExpired(conn) || IsIdleConnectionExpired(idleEntry, nowUtc))
                 {
@@ -429,50 +451,93 @@ public sealed class NzConnectionPool : IAsyncDisposable
             }
         }
 
-        while (Volatile.Read(ref _totalConnections) < _minPoolSize)
+        while (!_disposed && Volatile.Read(ref _totalConnections) < _minPoolSize)
         {
-            // Atomic reservation: concurrent rents can never push the total
-            // past MaxPoolSize, and a failed open returns the reservation.
-            if (!TryReserveConnectionSlot())
-                break;
-            NzConnection conn;
+            bool parked;
             try
             {
-                conn = await CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
+                parked = await TryCreateAndParkIdleAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch
             {
-                ReleaseReservation();
                 break;
             }
+            if (!parked)
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Test hook invoked with the freshly opened connection before it is
+    /// parked in the idle queue. Null in production.
+    /// </summary>
+    internal Func<NzConnection, Task>? BeforeParkIdleForTests;
+
+    /// <summary>
+    /// Reserves a slot, opens one physical connection and parks it in the
+    /// idle queue. Ownership rule: once the reservation succeeds there are
+    /// exactly two outcomes — parked (the reservation becomes the live
+    /// connection) or disposed + released. Any exception after a successful
+    /// open (cancelled lock wait, disposed pool/lock, probe failure) takes
+    /// the second path via try/finally, so it cannot be forgotten.
+    /// Returns false when no slot was free. Cancellation is rethrown after
+    /// cleanup.
+    /// </summary>
+    internal async Task<bool> TryCreateAndParkIdleAsync(CancellationToken cancellationToken)
+    {
+        // Atomic reservation: concurrent rents can never push the total
+        // past MaxPoolSize, and a failed open returns the reservation.
+        if (!TryReserveConnectionSlot())
+            return false;
+        NzConnection conn;
+        try
+        {
+            conn = await CreateConnectionAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            ReleaseReservation();
+            throw;
+        }
+        bool parked = false;
+        try
+        {
+            if (BeforeParkIdleForTests is not null)
+                await BeforeParkIdleForTests(conn).ConfigureAwait(false);
+            await _idleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await _idleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try
+                if (!_disposed)
                 {
-                    if (_disposed)
-                    {
-                        await DisposeConnectionAsync(conn).ConfigureAwait(false);
-                        ReleaseReservation();
-                    }
-                    else
-                    {
-                        _idle.Enqueue(new IdleConnection(conn, DateTime.UtcNow));
-                    }
-                }
-                finally
-                {
-                    ReleaseIdleLockSafe();
+                    _idle.Enqueue(new IdleConnection(conn, DateTime.UtcNow));
+                    parked = true;
                 }
             }
-            catch (ObjectDisposedException)
+            finally
+            {
+                ReleaseIdleLockSafe();
+            }
+        }
+        finally
+        {
+            if (!parked)
             {
                 await DisposeConnectionAsync(conn).ConfigureAwait(false);
                 ReleaseReservation();
-                break;
             }
         }
+        return parked;
     }
+
+    /// <summary>
+    /// Test hook driving one maintenance pass directly.
+    /// </summary>
+    internal Task RunMaintenanceForTestsAsync(CancellationToken cancellationToken = default)
+        => CleanupIdleAsync(cancellationToken);
 
     private static async ValueTask DisposeConnectionAsync(NzConnection connection)
     {
@@ -508,17 +573,46 @@ public sealed class NzConnectionPool : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    /// <summary>
+    /// Idempotent shared teardown: the first caller creates exactly one
+    /// dispose task, every concurrent caller awaits the same task, so no
+    /// caller observes completion before the pool is fully closed. No
+    /// double-dispose, no double-decrement, no deadlocks; a concurrent
+    /// <see cref="ReturnAsync"/> stays safe via its disposed checks.
+    /// </summary>
+    public ValueTask DisposeAsync()
     {
+        Task task;
         lock (_disposeLock)
         {
             if (_disposed)
-                return;
-            _disposed = true;
+            {
+                task = _disposeTask ?? Task.CompletedTask;
+            }
+            else
+            {
+                _disposed = true;
+                task = DisposeCoreAsync();
+                _disposeTask = task;
+            }
         }
+        return new ValueTask(task);
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        DisposeCoreRunCount++;
 
         _disposeCts.Cancel();
-        await _maintenanceTask.ConfigureAwait(false);
+        try
+        {
+            await _maintenanceTask.ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // A maintenance tick that lost the race with teardown; the queue
+            // below is drained deterministically anyway.
+        }
 
         await ClearAsync().ConfigureAwait(false);
 
@@ -527,9 +621,9 @@ public sealed class NzConnectionPool : IAsyncDisposable
         // whoever removes the entry owns its count.
         foreach (var kvp in _active)
         {
-            if (_active.TryRemove(kvp.Key, out var conn))
+            if (_active.TryRemove(kvp.Key, out _))
             {
-                await DisposeConnectionAsync(conn).ConfigureAwait(false);
+                await DisposeConnectionAsync(kvp.Key).ConfigureAwait(false);
                 Interlocked.Decrement(ref _totalConnections);
             }
         }

@@ -613,3 +613,99 @@ Npgsql. Dalsze zmiany wyłącznie z pomiarem (replay fixture + MemoryDiagnoser).
 Zakazane bez profilowania: `NzReadBuffer`, konwersje numeryczne, gettery
 prymitywne, `GetFieldValue<T>`, parameter rendering, lazy decoding,
 `SequentialAccess`, `ValueStringBuilder`, ownership ArrayPool.
+
+---
+
+# Pool lifecycle/cancellation pass (2026-10-04, cz. 3)
+
+Czysto correctness/lifecycle w `NzConnectionPool`. Zero zmian w
+`NzReadBuffer`, dekodowaniu `RowStandard`, fast drain, `Numeric`,
+`GetFieldValue<T>`, parameter rendering, lazy decoding, `SequentialAccess`,
+`ValueStringBuilder`, ścieżkach ArrayPool. Unit: **139 passed, 0 failed**
+(było 135; +4 nowe testy).
+
+## P1a. CleanupIdleAsync gubił connections przy cancellation
+
+### Problem
+
+`ThrowIfCancellationRequested()` stał PO zdjęciu wpisu z `_idle`, a
+re-enqueue/dispose dopiero za pętlą — cancel w środku gubił physical
+connections z trackingu (bez właściciela, licznik zawyżony).
+
+### Fix
+
+Anulowanie może już tylko *zapobiec rozpoczęciu* draina
+(`WaitAsync(token)`); po zdjęciu wpisu rozliczenie jest synchroniczne
+i bez punktów anulowania (klasyfikacja + requeue/dispose deterministyczne).
+
+### Test
+
+`Maintenance_CancelledToken_LosesNothing`: 50× naprzemiennie anulowany/żywy
+maintenance na 3 idle connections — za każdym razem
+`Idle + Active == Total`, nic nie ginie.
+
+## P1b. Leak rezerwacji po udanym Open w maintenance
+
+### Problem
+
+`TryReserve → Open OK → WaitAsync(_idleLock) rzuca OCE/ODE` = utworzone
+połączenie bez dispose + rezerwacja bez release (`_totalConnections`
+trwale zawyżone).
+
+### Fix
+
+Nowa metoda `TryCreateAndParkIdleAsync` z regułą ownership w try/finally:
+sukces = parkowanie (rezerwacja staje się żywym połączeniem), każda inna
+ścieżka = `DisposeConnectionAsync` + `ReleaseReservation`. Flaga `parked`,
+pojedynczy punkt cleanupu. Do tego hook testowy `BeforeParkIdleForTests`.
+
+### Test
+
+`MaintenanceRefill_CancelAfterOpen_DisposesAndReleases`: rezerwacja → udany
+Open (replay) → deterministyczny cancel przed enqueue (bramka TCS) →
+connection `Closed`, `TotalConnections` wraca do poprzedniej wartości.
+
+## P2. Współdzielony teardown DisposeAsync
+
+### Problem
+
+Drugi równoległy `DisposeAsync()` wracał natychmiast po fladze `_disposed`,
+zanim pierwszy skończył maintenance shutdown / Clear / reap / dispose
+prymitywów — zakończenie nie oznaczało domknięcia puli.
+
+### Fix
+
+Pierwszy caller tworzy jeden `DisposeCoreAsync()` Task (`_disposeTask`),
+każdy kolejny awaituje ten sam Task. Teardown dokładnie raz
+(`DisposeCoreRunCount == 1`), brak double-dispose/decrement/deadlocków,
+równoległy `ReturnAsync` bezpieczny jak wcześniej.
+
+### Test
+
+`ConcurrentDisposeAsync_AllAwaitFullTeardown_ExactlyOnce`: 8 równoległych
+dispose, potem `Total == Active == Idle == 0`, rent rzuca ODE.
+
+## Dodatkowe znaleziska stresu (naprawione w tym passie)
+
+- **Wiszący waiter (root cause hanga):** udowodnione empirycznie, że
+  `SemaphoreSlim.Dispose()` nigdy nie kończy zaparkowanego `WaitAsync`.
+  `RentAsync` (semaphore) i sekcja enqueue w `ReturnAsync` (`_idleLock`)
+  mogły wisieć w nieskończoność przy teardown. Fix: `RentAsync` czeka na
+  linked token (caller + `_disposeCts`), sekcja enqueue na
+  `_idleLock.WaitAsync(_disposeCts.Token)` z obsługą OCE jak teardown.
+- **Kluczowanie `_active` po Pid:** wszystkie replay connections mają
+  `Pid == -1` (brak BackendKeyData) — wpisy nadpisywały się, licznik
+  rozjeżdżał się w stresie. Zmiana na klucz po referencji (`NzConnection`,
+  brak nadpisanego `Equals`), każdy physical connection ma własny slot.
+
+## Stress test
+
+`PoolLifecycle_Stress_RentReturnMaintenanceCancelDispose` (replay):
+6 workerów rent→częściowy odczyt→return, 2 maintenance z losową
+kancelacją, 4 równoległe `DisposeAsync` w trakcie pracy. Finał:
+`Total == Active == Idle == 0`, `DisposeCoreRunCount == 1`, zero wyjątków
+(`ReturnAsync` nie rzuca nawet ODE), zero deadlocków (~2 s + teardown).
+
+---
+
+## DO NOT TOUCH WITHOUT PROFILING.
