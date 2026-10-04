@@ -1,4 +1,4 @@
-using System.Text;
+using System.Buffers;
 
 namespace JustyBase.NetezzaDriver;
 
@@ -226,117 +226,137 @@ internal static class NzParameterHelper
         int count = parameters.Count;
         Span<bool> used = count <= 128 ? stackalloc bool[count] : new bool[count];
 
-        var sb = new StringBuilder(sql.Length + 256);
-        int pos = 0;
-        var placeholders = plan.Placeholders;
+        // Rent from the pool instead of a StringBuilder: avoids both the
+        // builder object and its private growable char[] per render.
+        ValueStringBuilder sb = new ValueStringBuilder(ArrayPool<char>.Shared.Rent(sql.Length + 256));
 
-        for (int k = 0; k < placeholders.Length; k++)
+        try
         {
-            var ph = placeholders[k];
-            if (!ph.IsNamed)
+            int pos = 0;
+            var placeholders = plan.Placeholders;
+
+            for (int k = 0; k < placeholders.Length; k++)
             {
-                continue;
+                var ph = placeholders[k];
+                if (!ph.IsNamed)
+                {
+                    continue;
+                }
+
+                sb.Append(sql, pos, ph.Start - pos);
+                ReadOnlySpan<char> nameSpan = sql.AsSpan(ph.NameStart, ph.NameLength);
+
+                NzParameter? match = null;
+                int matchIdx = -1;
+                for (int idx = 0; idx < count; idx++)
+                {
+                    var p = parameters[idx];
+                    if (p.IsPositional)
+                        continue;
+                    if (p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
+                    {
+                        match = p;
+                        matchIdx = idx;
+                        break;
+                    }
+                }
+
+                if (match is not null)
+                {
+                    match.AppendSqlLiteral(ref sb);
+                    used[matchIdx] = true;
+                    // Duplicate parameter entries can resolve to the same name
+                    // (e.g. "id" and ":id"). They all map to this placeholder, so
+                    // mark every later duplicate as used as well; otherwise they
+                    // would be reported as provided but not used. No equal name can
+                    // precede matchIdx because the scan stops at the first match.
+                    for (int idx = matchIdx + 1; idx < count; idx++)
+                    {
+                        var p = parameters[idx];
+                        if (!p.IsPositional && p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
+                            used[idx] = true;
+                    }
+                }
+                else
+                {
+                    string lookup = sql.Substring(ph.Start, ph.Length);
+                    throw new InvalidOperationException($"Missing value for SQL parameter '{lookup}'.");
+                }
+
+                pos = ph.Start + ph.Length;
             }
 
-            sb.Append(sql, pos, ph.Start - pos);
-            ReadOnlySpan<char> nameSpan = sql.AsSpan(ph.NameStart, ph.NameLength);
+            // Copy tail including any '?' left verbatim plus literals.
+            // Named placeholders were skipped above via pos jumps; positional '?'
+            // placeholders are part of literal spans (pos only jumps over named).
+            // To interleave correctly, we appended literals before each named ph;
+            // '?' chars remain in the copied spans. Append remainder:
+            sb.Append(sql, pos, sql.Length - pos);
 
-            NzParameter? match = null;
-            int matchIdx = -1;
             for (int idx = 0; idx < count; idx++)
             {
                 var p = parameters[idx];
-                if (p.IsPositional)
-                    continue;
-                if (p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
+                if (!p.IsPositional && !used[idx])
                 {
-                    match = p;
-                    matchIdx = idx;
-                    break;
+                    var resolved = p.ResolvedName;
+                    if (!string.IsNullOrEmpty(resolved))
+                        throw new InvalidOperationException($"SQL parameter '{p.ParameterName}' was provided but not used.");
                 }
             }
 
-            if (match is not null)
-            {
-                match.AppendSqlLiteral(sb);
-                used[matchIdx] = true;
-                // Duplicate parameter entries can resolve to the same name
-                // (e.g. "id" and ":id"). They all map to this placeholder, so
-                // mark every later duplicate as used as well; otherwise they
-                // would be reported as provided but not used. No equal name can
-                // precede matchIdx because the scan stops at the first match.
-                for (int idx = matchIdx + 1; idx < count; idx++)
-                {
-                    var p = parameters[idx];
-                    if (!p.IsPositional && p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
-                        used[idx] = true;
-                }
-            }
-            else
-            {
-                string lookup = sql.Substring(ph.Start, ph.Length);
-                throw new InvalidOperationException($"Missing value for SQL parameter '{lookup}'.");
-            }
-
-            pos = ph.Start + ph.Length;
+            return sb.ToString();
         }
-
-        // Copy tail including any '?' left verbatim plus literals.
-        // Named placeholders were skipped above via pos jumps; positional '?'
-        // placeholders are part of literal spans (pos only jumps over named).
-        // To interleave correctly, we appended literals before each named ph;
-        // '?' chars remain in the copied spans. Append remainder:
-        sb.Append(sql, pos, sql.Length - pos);
-
-        for (int idx = 0; idx < count; idx++)
+        finally
         {
-            var p = parameters[idx];
-            if (!p.IsPositional && !used[idx])
-            {
-                var resolved = p.ResolvedName;
-                if (!string.IsNullOrEmpty(resolved))
-                    throw new InvalidOperationException($"SQL parameter '{p.ParameterName}' was provided but not used.");
-            }
+            sb.Dispose();
         }
-
-        return sb.ToString();
     }
 
     private static string RenderPositional(string sql, SqlTemplatePlan plan, NzParameterCollection parameters)
     {
         int count = parameters.Count;
-        var sb = new StringBuilder(sql.Length + 256);
-        int pos = 0;
-        int paramIndex = 0;
-        var placeholders = plan.Placeholders;
+        // Rent from the pool instead of a StringBuilder: avoids both the
+        // builder object and its private growable char[] per render.
+        ValueStringBuilder sb = new ValueStringBuilder(ArrayPool<char>.Shared.Rent(sql.Length + 256));
 
-        for (int k = 0; k < placeholders.Length; k++)
+        try
         {
-            var ph = placeholders[k];
-            if (ph.IsNamed)
+            int pos = 0;
+            int paramIndex = 0;
+            var placeholders = plan.Placeholders;
+
+            for (int k = 0; k < placeholders.Length; k++)
             {
-                continue;
+                var ph = placeholders[k];
+                if (ph.IsNamed)
+                {
+                    continue;
+                }
+
+                sb.Append(sql, pos, ph.Start - pos);
+                if (paramIndex < count)
+                {
+                    parameters[paramIndex].AppendSqlLiteral(ref sb);
+                    paramIndex++;
+                }
+                else
+                {
+                    throw new InvalidOperationException("Not enough positional parameter values were provided.");
+                }
+                pos = ph.Start + 1;
             }
 
-            sb.Append(sql, pos, ph.Start - pos);
+            sb.Append(sql, pos, sql.Length - pos);
+
             if (paramIndex < count)
-            {
-                parameters[paramIndex].AppendSqlLiteral(sb);
-                paramIndex++;
-            }
-            else
-            {
-                throw new InvalidOperationException("Not enough positional parameter values were provided.");
-            }
-            pos = ph.Start + 1;
+                throw new InvalidOperationException("More positional parameter values were provided than placeholders in SQL.");
+
+            return sb.ToString();
         }
-
-        sb.Append(sql, pos, sql.Length - pos);
-
-        if (paramIndex < count)
-            throw new InvalidOperationException("More positional parameter values were provided than placeholders in SQL.");
-
-        return sb.ToString();
+        finally
+        {
+            sb.Dispose();
+        }
     }
 
     private static bool IsIdentifierStart(char c)
