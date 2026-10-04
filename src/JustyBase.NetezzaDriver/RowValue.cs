@@ -49,6 +49,18 @@ public struct RowValue
 
     internal void ResetForReuse() => this = default;
 
+    /// <summary>
+    /// Sentinel stored in <see cref="typeCode"/> to mark a column that has not
+    /// been decoded yet under <see cref="NzConnection.UseLazyColumnDecoding"/>.
+    /// </summary>
+    internal const TypeCodeEx NotDecoded = (TypeCodeEx)(-1);
+
+    internal void ResetForLazyDecode()
+    {
+        this = default;
+        typeCode = NotDecoded;
+    }
+
     public readonly object GetValue() => typeCode switch
     {
         TypeCodeEx.Empty or TypeCodeEx.DBNull => DBNull.Value,

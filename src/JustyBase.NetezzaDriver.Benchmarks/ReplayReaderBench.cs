@@ -64,6 +64,7 @@ public class ReplayReaderBench
     [Benchmark(Baseline = true)]
     public int Sync_GetValue()
     {
+        _connection.UseLazyColumnDecoding = false;
         using var command = _connection.CreateCommand(_fixture.Query);
         using var reader = command.ExecuteReader();
         int rows = 0;
@@ -71,6 +72,93 @@ public class ReplayReaderBench
         while (reader.Read())
         {
             for (int i = 0; i < fields; i++)
+            {
+                _ = reader.GetValue(i);
+            }
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark]
+    public int Sync_GetValue_Lazy()
+    {
+        _connection.UseLazyColumnDecoding = true;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int rows = 0;
+        int fields = reader.FieldCount;
+        while (reader.Read())
+        {
+            for (int i = 0; i < fields; i++)
+            {
+                _ = reader.GetValue(i);
+            }
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark]
+    public int Sync_FirstColumn()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int rows = 0;
+        while (reader.Read())
+        {
+            _ = reader.GetValue(0);
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark]
+    public int Sync_FirstColumn_Lazy()
+    {
+        _connection.UseLazyColumnDecoding = true;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int rows = 0;
+        while (reader.Read())
+        {
+            _ = reader.GetValue(0);
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark]
+    public int Sync_TwoColumns()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int columns = Math.Min(2, reader.FieldCount);
+        int rows = 0;
+        while (reader.Read())
+        {
+            for (int i = 0; i < columns; i++)
+            {
+                _ = reader.GetValue(i);
+            }
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark]
+    public int Sync_TwoColumns_Lazy()
+    {
+        _connection.UseLazyColumnDecoding = true;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int columns = Math.Min(2, reader.FieldCount);
+        int rows = 0;
+        while (reader.Read())
+        {
+            for (int i = 0; i < columns; i++)
             {
                 _ = reader.GetValue(i);
             }
