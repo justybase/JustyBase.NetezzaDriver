@@ -599,6 +599,9 @@ public sealed class NzConnection : DbConnection
     private readonly ILoggerFactory? _loggerFactory;
 
     private bool _disposed = false;
+    // Separate from _disposed because Close() is reusable. Set before tearing
+    // down protocol resources and cleared only after a new read buffer exists.
+    private int _protocolReadUnavailable = 1;
     private bool _protocolFaulted;
     private long _protocolRowNumber;
     private long _currentProtocolRowNumber;
@@ -1012,115 +1015,131 @@ public sealed class NzConnection : DbConnection
 
     private void PreExecution(NzCommand nzCommand, string query)
     {
-        ThrowIfProtocolFaulted();
-        ReleaseLazyOversize();
-        _lazyRowActive = false;
-        _error = null;
-        _backendException = null;
-        nzCommand._recordsAffected = -1;
-        nzCommand.NewPreparedStatement = new PreparedStatement();
-        nzCommand.NewPreparedStatement.Sql = query;
-        //if (State == ConnectionState.Executing)
-        if (State != ConnectionState.Connecting)
-        {
-            _readBuffer!.Skip(4);
-            EnsureProtocolSynced(query);
-        }
-        byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
         try
         {
-            writeBuffer[0] = (byte)'P';
-            if (_commandNumber != -1)
+            ThrowIfProtocolFaulted();
+            ThrowIfProtocolReadUnavailable();
+            ReleaseLazyOversize();
+            _lazyRowActive = false;
+            _error = null;
+            _backendException = null;
+            nzCommand._recordsAffected = -1;
+            nzCommand.NewPreparedStatement = new PreparedStatement();
+            nzCommand.NewPreparedStatement.Sql = query;
+            //if (State == ConnectionState.Executing)
+            if (State != ConnectionState.Connecting)
             {
-                _commandNumber += 1;
-                Core.IPack(_commandNumber, writeBuffer.AsSpan(1));
+                _readBuffer!.Skip(4);
+                EnsureProtocolSynced(query);
             }
-            else
+            byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
+            try
             {
-                writeBuffer[1] = 0xFF;//NEW
-                writeBuffer[2] = 0xFF;//NEW
-                writeBuffer[3] = 0xFF;//NEW
-                writeBuffer[4] = 0xFF;//NEW
-            }
+                writeBuffer[0] = (byte)'P';
+                if (_commandNumber != -1)
+                {
+                    _commandNumber += 1;
+                    Core.IPack(_commandNumber, writeBuffer.AsSpan(1));
+                }
+                else
+                {
+                    writeBuffer[1] = 0xFF;//NEW
+                    writeBuffer[2] = 0xFF;//NEW
+                    writeBuffer[3] = 0xFF;//NEW
+                    writeBuffer[4] = 0xFF;//NEW
+                }
 
-            if (_commandNumber > 100000)
-            {
-                _commandNumber = 1;
-            }
+                if (_commandNumber > 100000)
+                {
+                    _commandNumber = 1;
+                }
 
-            int written = 5;
-            if (query != null)
-            {
-                written += Encoding.UTF8.GetBytes(query, writeBuffer.AsSpan(written));//NEW
-                writeBuffer[written] = 0;
-                written += 1;
+                int written = 5;
+                if (query != null)
+                {
+                    written += Encoding.UTF8.GetBytes(query, writeBuffer.AsSpan(written));//NEW
+                    writeBuffer[written] = 0;
+                    written += 1;
+                }
+                _stream.Write(writeBuffer, 0, written);
+                _stream.Flush();
+                if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                    _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(writeBuffer, 0, written));
             }
-            _stream.Write(writeBuffer, 0, written);
-            _stream.Flush();
-            if (_logger?.IsEnabled(LogLevel.Debug) == true)
-                _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(writeBuffer, 0, written));
+            finally
+            {
+                ReleaseQueryBuffer(writeBuffer, pooledWriteBuffer);
+            }
+            _state = ConnectionState.Executing;
         }
-        finally
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
         {
-            ReleaseQueryBuffer(writeBuffer, pooledWriteBuffer);
+            throw CreateConnectionClosedException(ex);
         }
-        _state = ConnectionState.Executing;
     }
 
     private async Task PreExecutionAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
     {
-        ThrowIfProtocolFaulted();
-        ReleaseLazyOversize();
-        _lazyRowActive = false;
-        _error = null;
-        _backendException = null;
-        nzCommand._recordsAffected = -1;
-        nzCommand.NewPreparedStatement = new PreparedStatement();
-        nzCommand.NewPreparedStatement.Sql = query;
-        if (State != ConnectionState.Connecting)
-        {
-            await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
-            await EnsureProtocolSyncedAsync(query, cancellationToken).ConfigureAwait(false);
-        }
-        byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
         try
         {
-            writeBuffer[0] = (byte)'P';
-            if (_commandNumber != -1)
+            ThrowIfProtocolFaulted();
+            ThrowIfProtocolReadUnavailable();
+            ReleaseLazyOversize();
+            _lazyRowActive = false;
+            _error = null;
+            _backendException = null;
+            nzCommand._recordsAffected = -1;
+            nzCommand.NewPreparedStatement = new PreparedStatement();
+            nzCommand.NewPreparedStatement.Sql = query;
+            if (State != ConnectionState.Connecting)
             {
-                _commandNumber += 1;
-                Core.IPack(_commandNumber, writeBuffer.AsSpan(1));
+                await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+                await EnsureProtocolSyncedAsync(query, cancellationToken).ConfigureAwait(false);
             }
-            else
+            byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
+            try
             {
-                writeBuffer[1] = 0xFF;
-                writeBuffer[2] = 0xFF;
-                writeBuffer[3] = 0xFF;
-                writeBuffer[4] = 0xFF;
-            }
+                writeBuffer[0] = (byte)'P';
+                if (_commandNumber != -1)
+                {
+                    _commandNumber += 1;
+                    Core.IPack(_commandNumber, writeBuffer.AsSpan(1));
+                }
+                else
+                {
+                    writeBuffer[1] = 0xFF;
+                    writeBuffer[2] = 0xFF;
+                    writeBuffer[3] = 0xFF;
+                    writeBuffer[4] = 0xFF;
+                }
 
-            if (_commandNumber > 100000)
-            {
-                _commandNumber = 1;
-            }
+                if (_commandNumber > 100000)
+                {
+                    _commandNumber = 1;
+                }
 
-            int written = 5;
-            if (query != null)
-            {
-                written += Encoding.UTF8.GetBytes(query, writeBuffer.AsSpan(written));
-                writeBuffer[written] = 0;
-                written += 1;
+                int written = 5;
+                if (query != null)
+                {
+                    written += Encoding.UTF8.GetBytes(query, writeBuffer.AsSpan(written));
+                    writeBuffer[written] = 0;
+                    written += 1;
+                }
+                await _stream.WriteAsync(writeBuffer.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                    _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(writeBuffer, 0, written));
             }
-            await _stream.WriteAsync(writeBuffer.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-            if (_logger?.IsEnabled(LogLevel.Debug) == true)
-                _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(writeBuffer, 0, written));
+            finally
+            {
+                ReleaseQueryBuffer(writeBuffer, pooledWriteBuffer);
+            }
+            _state = ConnectionState.Executing;
         }
-        finally
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
         {
-            ReleaseQueryBuffer(writeBuffer, pooledWriteBuffer);
+            throw CreateConnectionClosedException(ex);
         }
-        _state = ConnectionState.Executing;
     }
 
     private byte[] Read(int length, byte[]? buffer = null)
@@ -1474,45 +1493,59 @@ public sealed class NzConnection : DbConnection
 
     internal bool DoNextStep(NzCommand nzCommand)
     {
-        ThrowIfProtocolFaulted();
-        ThrowIfDisposed();
-        if (_shouldReadByte)
+        try
         {
-            ReadNextResponseByte();
-        }
-        var res = IntepretReturnedByte(nzCommand);
-        if (_error != null)
-        {
-            while (res && _shouldReadByte)
+            ThrowIfProtocolFaulted();
+            ThrowIfProtocolReadUnavailable();
+            if (_shouldReadByte)
             {
                 ReadNextResponseByte();
-                res = IntepretReturnedByte(nzCommand);
             }
-            throw CreateCurrentException();
+            var res = IntepretReturnedByte(nzCommand);
+            if (_error != null)
+            {
+                while (res && _shouldReadByte)
+                {
+                    ReadNextResponseByte();
+                    res = IntepretReturnedByte(nzCommand);
+                }
+                throw CreateCurrentException();
+            }
+            return res;
         }
-        return res;
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
+        {
+            throw CreateConnectionClosedException(ex);
+        }
     }
 
     internal async ValueTask<bool> DoNextStepAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
-        ThrowIfProtocolFaulted();
-        ThrowIfDisposed();
-        if (_shouldReadByte)
+        try
         {
-            await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        var res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
-        if (_error != null)
-        {
-            while (res && _shouldReadByte)
+            ThrowIfProtocolFaulted();
+            ThrowIfProtocolReadUnavailable();
+            if (_shouldReadByte)
             {
                 await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
-                res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
             }
-            throw CreateCurrentException();
+
+            var res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
+            if (_error != null)
+            {
+                while (res && _shouldReadByte)
+                {
+                    await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
+                    res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
+                }
+                throw CreateCurrentException();
+            }
+            return res;
         }
-        return res;
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
+        {
+            throw CreateConnectionClosedException(ex);
+        }
     }
 
     /// <summary>
@@ -1523,51 +1556,73 @@ public sealed class NzConnection : DbConnection
     /// </summary>
     internal bool DoNextStepDiscardingRows(NzCommand nzCommand)
     {
-        ThrowIfProtocolFaulted();
-        ThrowIfDisposed();
-        if (_shouldReadByte)
+        try
         {
-            ReadNextResponseByte();
-        }
-        var res = IntepretReturnedByte(nzCommand, discardRows: true);
-        if (_error != null)
-        {
-            while (res && _shouldReadByte)
+            ThrowIfProtocolFaulted();
+            ThrowIfProtocolReadUnavailable();
+            if (_shouldReadByte)
             {
                 ReadNextResponseByte();
-                res = IntepretReturnedByte(nzCommand, discardRows: true);
             }
-            throw CreateCurrentException();
+            var res = IntepretReturnedByte(nzCommand, discardRows: true);
+            if (_error != null)
+            {
+                while (res && _shouldReadByte)
+                {
+                    ReadNextResponseByte();
+                    res = IntepretReturnedByte(nzCommand, discardRows: true);
+                }
+                throw CreateCurrentException();
+            }
+            return res;
         }
-        return res;
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
+        {
+            throw CreateConnectionClosedException(ex);
+        }
     }
 
     internal async ValueTask<bool> DoNextStepDiscardingRowsAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
-        ThrowIfProtocolFaulted();
-        ThrowIfDisposed();
-        if (_shouldReadByte)
+        try
         {
-            await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        var res = await IntepretReturnedByteAsync(nzCommand, cancellationToken, discardRows: true).ConfigureAwait(false);
-        if (_error != null)
-        {
-            while (res && _shouldReadByte)
+            ThrowIfProtocolFaulted();
+            ThrowIfProtocolReadUnavailable();
+            if (_shouldReadByte)
             {
                 await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
-                res = await IntepretReturnedByteAsync(nzCommand, cancellationToken, discardRows: true).ConfigureAwait(false);
             }
-            throw CreateCurrentException();
+
+            var res = await IntepretReturnedByteAsync(nzCommand, cancellationToken, discardRows: true).ConfigureAwait(false);
+            if (_error != null)
+            {
+                while (res && _shouldReadByte)
+                {
+                    await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
+                    res = await IntepretReturnedByteAsync(nzCommand, cancellationToken, discardRows: true).ConfigureAwait(false);
+                }
+                throw CreateCurrentException();
+            }
+            return res;
         }
-        return res;
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
+        {
+            throw CreateConnectionClosedException(ex);
+        }
     }
 
     internal void ReadNextResponseByte()
     {
-        _lastResponse = _readBuffer!.ReadByteOrEof();
-        _shouldReadByte = false;
+        try
+        {
+            ThrowIfProtocolReadUnavailable();
+            _lastResponse = _readBuffer!.ReadByteOrEof();
+            _shouldReadByte = false;
+        }
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
+        {
+            throw CreateConnectionClosedException(ex);
+        }
     }
 
     private async ValueTask<int> ReadByteAsync(CancellationToken cancellationToken = default)
@@ -1829,23 +1884,43 @@ public sealed class NzConnection : DbConnection
     }
 
     /// <summary>
-    /// A read raced with teardown (pool reap, explicit dispose) must surface
-    /// a typed backend error, never a <see cref="NullReferenceException"/>
-    /// from the already-released read buffer. Drain loops already translate
-    /// <see cref="NetezzaException"/> into clean termination.
+    /// Reads are unavailable while closed or while teardown is releasing the
+    /// protocol resources. This state is separate from <see cref="_disposed"/>
+    /// because a connection can be opened again after <see cref="Close"/>.
     /// </summary>
-    private void ThrowIfDisposed()
+    private bool IsProtocolReadUnavailable
+        => Volatile.Read(ref _protocolReadUnavailable) != 0 || _disposed;
+
+    private bool IsProtocolTeardownException(Exception exception)
+        => IsProtocolReadUnavailable
+            && exception is not NetezzaException
+            && exception is not OperationCanceledException;
+
+    private static NetezzaException CreateConnectionClosedException(Exception? innerException = null)
+        => innerException is null
+            ? new NetezzaException("Connection is closed.")
+            : new NetezzaException("Connection was closed during a protocol operation.", innerException);
+
+    private void ThrowIfProtocolReadUnavailable()
     {
-        if (_disposed)
+        if (IsProtocolReadUnavailable)
         {
-            throw new NetezzaException("Connection is closed.");
+            throw CreateConnectionClosedException();
         }
     }
 
     internal async ValueTask ReadNextResponseByteAsync(CancellationToken cancellationToken = default)
     {
-        _lastResponse = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
-        _shouldReadByte = false;
+        try
+        {
+            ThrowIfProtocolReadUnavailable();
+            _lastResponse = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+            _shouldReadByte = false;
+        }
+        catch (Exception ex) when (IsProtocolTeardownException(ex))
+        {
+            throw CreateConnectionClosedException(ex);
+        }
     }
     private bool _shouldReadByte = true;
 
@@ -4380,6 +4455,7 @@ public sealed class NzConnection : DbConnection
 
     public override void Close()
     {
+        Interlocked.Exchange(ref _protocolReadUnavailable, 1);
         ReleaseLazyOversize();
         ReleaseScratchBuffers();
         _lazyRowActive = false;
@@ -4403,6 +4479,7 @@ public sealed class NzConnection : DbConnection
 
     public override async Task CloseAsync()
     {
+        Interlocked.Exchange(ref _protocolReadUnavailable, 1);
         ReleaseLazyOversize();
         ReleaseScratchBuffers();
         _lazyRowActive = false;
@@ -4458,6 +4535,7 @@ public sealed class NzConnection : DbConnection
     }
     public void Open(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, bool useBufferedStream = false, bool setSocketBufferSizes = false)
     {
+        Volatile.Write(ref _protocolReadUnavailable, 1);
         if (_tmp_buffer.Length == 0)
         {
             _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
@@ -4476,6 +4554,7 @@ public sealed class NzConnection : DbConnection
             _stream = response;
             _readBuffer?.Dispose();
             _readBuffer = new NzReadBuffer(_stream, ReadBufferSize);
+            Volatile.Write(ref _protocolReadUnavailable, 0);
             _protocolFaulted = false;
             _protocolRowNumber = 0;
             _currentProtocolRowNumber = 0;
@@ -4505,6 +4584,7 @@ public sealed class NzConnection : DbConnection
     public async Task OpenAsync(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, CancellationToken cancellationToken = default, bool useBufferedStream = false, bool setSocketBufferSizes = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        Volatile.Write(ref _protocolReadUnavailable, 1);
         if (_tmp_buffer.Length == 0)
         {
             _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
@@ -4523,6 +4603,7 @@ public sealed class NzConnection : DbConnection
             _stream = response;
             _readBuffer?.Dispose();
             _readBuffer = new NzReadBuffer(_stream, ReadBufferSize);
+            Volatile.Write(ref _protocolReadUnavailable, 0);
             _protocolFaulted = false;
             _protocolRowNumber = 0;
             _currentProtocolRowNumber = 0;
