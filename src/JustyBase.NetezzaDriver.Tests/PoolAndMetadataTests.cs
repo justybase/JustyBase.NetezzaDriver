@@ -45,25 +45,13 @@ public sealed class PoolAndMetadataTests
     }
 
     [Fact]
-    public void DbosTupleDesc_EnsureCapacity_AllowsAddsWithoutRealloc()
+    public void DbosTupleDesc_Initialize_AllocatesExactArrays()
     {
         var desc = new DbosTupleDesc();
-        desc.EnsureCapacity(256);
-        Assert.True(desc.FieldType.Capacity >= 256);
-        Assert.True(desc.FieldNullAllowed.Capacity >= 256);
-        for (int i = 0; i < 256; i++)
-        {
-            desc.FieldType.Add(i);
-            desc.FieldSize.Add(i);
-            desc.FieldTrueSize.Add(i);
-            desc.FieldOffset.Add(i);
-            desc.FieldPhysField.Add(i);
-            desc.FieldLogField.Add(i);
-            desc.FieldNullAllowed.Add(true);
-            desc.FieldFixedSize.Add(i);
-            desc.FieldSpringField.Add(i);
-        }
-        Assert.Equal(256, desc.FieldType.Count);
+        desc.Initialize(256);
+        Assert.Equal(256, desc.FieldTypeArr.Length);
+        Assert.Equal(256, desc.FieldSizeArr.Length);
+        Assert.Equal(256, desc.FieldNullAllowedArr.Length);
     }
 
     [Fact]

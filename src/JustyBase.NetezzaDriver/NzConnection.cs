@@ -2750,13 +2750,18 @@ public sealed class NzConnection : DbConnection
         _tupdesc.FixedFieldsSize = IUnpack(data, dataIdx + 24);
         _tupdesc.MaxRecordSize = IUnpack(data, dataIdx + 28);
         _tupdesc.NumFields = IUnpack(data, dataIdx + 32);
-        // NumFields comes straight off the wire, so never pre-size from it
-        // unbounded: a corrupt value could request gigabytes before the field
-        // loop fails on a short payload. Cap by what the payload can hold
-        // (36-byte header + 36 bytes per field + 8-byte trailer); the loop
-        // below still performs the real validation.
+        // NumFields comes straight off the wire, so validate it against what the
+        // payload can hold (36-byte header + 36 bytes per field + 8-byte trailer)
+        // before allocating the final arrays. A corrupt count can otherwise
+        // request gigabytes.
         int maxPlausibleFields = (data.Length - 36) / 36;
-        _tupdesc.EnsureCapacity(Math.Min(_tupdesc.NumFields, maxPlausibleFields));
+        if (_tupdesc.NumFields < 0 || _tupdesc.NumFields > maxPlausibleFields)
+        {
+            throw new InvalidDataException(
+                $"Invalid RowStandard field count {_tupdesc.NumFields} for a {data.Length}-byte descriptor.");
+        }
+
+        _tupdesc.Initialize(_tupdesc.NumFields);
 
         dataIdx += 36;
         for (int ix = 0; ix < _tupdesc.NumFields; ix++)
@@ -2766,21 +2771,21 @@ public sealed class NzConnection : DbConnection
 
             if (ft == NzTypeInt && _nzCommand?.NewPreparedStatement?.Description?[ix].TypeOID == 702)
             {
-                _tupdesc.FieldType.Add(NzTypeIntvsAbsTimeFIX);
+                _tupdesc.FieldTypeArr[ix] = NzTypeIntvsAbsTimeFIX;
             }
             else
             {
-                _tupdesc.FieldType.Add(ft);
+                _tupdesc.FieldTypeArr[ix] = ft;
             }
 
-            _tupdesc.FieldSize.Add(IUnpack(data, dataIdx + 4));
-            _tupdesc.FieldTrueSize.Add(IUnpack(data, dataIdx + 8));
-            _tupdesc.FieldOffset.Add(IUnpack(data, dataIdx + 12));
-            _tupdesc.FieldPhysField.Add(IUnpack(data, dataIdx + 16));
-            _tupdesc.FieldLogField.Add(IUnpack(data, dataIdx + 20));
-            _tupdesc.FieldNullAllowed.Add(IUnpack(data, dataIdx + 24) != 0);
-            _tupdesc.FieldFixedSize.Add(IUnpack(data, dataIdx + 28));
-            _tupdesc.FieldSpringField.Add(IUnpack(data, dataIdx + 32));
+            _tupdesc.FieldSizeArr[ix] = IUnpack(data, dataIdx + 4);
+            _tupdesc.FieldTrueSizeArr[ix] = IUnpack(data, dataIdx + 8);
+            _tupdesc.FieldOffsetArr[ix] = IUnpack(data, dataIdx + 12);
+            _tupdesc.FieldPhysFieldArr[ix] = IUnpack(data, dataIdx + 16);
+            _tupdesc.FieldLogFieldArr[ix] = IUnpack(data, dataIdx + 20);
+            _tupdesc.FieldNullAllowedArr[ix] = IUnpack(data, dataIdx + 24) != 0;
+            _tupdesc.FieldFixedSizeArr[ix] = IUnpack(data, dataIdx + 28);
+            _tupdesc.FieldSpringFieldArr[ix] = IUnpack(data, dataIdx + 32);
             dataIdx += 36;
         }
 
@@ -2792,8 +2797,6 @@ public sealed class NzConnection : DbConnection
                 _tupdesc.NumFields,
                 _tupdesc.MaxRecordSize,
                 _tupdesc.FixedFieldsSize);
-
-        _tupdesc.Freeze();
     }
 
 
@@ -3663,7 +3666,7 @@ public sealed class NzConnection : DbConnection
         }
         if (IsExtendedRowDescriptionAvaiable())
         {
-            return _tupdesc.FieldSize[coldex];
+            return _tupdesc.FieldSizeArr[coldex];
         }
         return _nzCommand.NewPreparedStatement!.Description![coldex].TypeModifier - 16;
     }
@@ -3679,7 +3682,7 @@ public sealed class NzConnection : DbConnection
         }
         if (IsExtendedRowDescriptionAvaiable() && _tupdesc.NullsAllowed > 0)
         {
-            return _tupdesc.FieldNullAllowed[coldex];
+            return _tupdesc.FieldNullAllowedArr[coldex];
         }
         return true;
     }

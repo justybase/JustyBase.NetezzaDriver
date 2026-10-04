@@ -1,5 +1,9 @@
 ﻿/// <summary>
 /// Represents the description of a tuple in the Netezza database.
+/// Parsed metadata and the per-field arrays share one representation: the
+/// descriptor payload is copied straight into the final arrays once
+/// <see cref="NumFields"/> has been validated, avoiding a duplicate List
+/// representation and the copy performed by the former <c>Freeze()</c> step.
 /// </summary>
 internal sealed class DbosTupleDesc
 {
@@ -49,51 +53,6 @@ internal sealed class DbosTupleDesc
     public int NumFields { get; set; }
 
     /// <summary>
-    /// Gets or sets the list of field types.
-    /// </summary>
-    public List<int> FieldType { get; set; }
-
-    /// <summary>
-    /// Gets or sets the list of field sizes.
-    /// </summary>
-    public List<int> FieldSize { get; set; }
-
-    /// <summary>
-    /// Gets or sets the list of true field sizes.
-    /// </summary>
-    public List<int> FieldTrueSize { get; set; }
-
-    /// <summary>
-    /// Gets or sets the list of field offsets.
-    /// </summary>
-    public List<int> FieldOffset { get; set; }
-
-    /// <summary>
-    /// Gets or sets the list of physical field indices.
-    /// </summary>
-    public List<int> FieldPhysField { get; set; }
-
-    /// <summary>
-    /// Gets or sets the list of logical field indices.
-    /// </summary>
-    public List<int> FieldLogField { get; set; }
-
-    /// <summary>
-    /// Gets or sets a list indicating whether each field allows nulls.
-    /// </summary>
-    public List<bool> FieldNullAllowed { get; set; }
-
-    /// <summary>
-    /// Gets or sets the list of fixed field sizes.
-    /// </summary>
-    public List<int> FieldFixedSize { get; set; }
-
-    /// <summary>
-    /// Gets or sets the list of spring field indices.
-    /// </summary>
-    public List<int> FieldSpringField { get; set; }
-
-    /// <summary>
     /// Gets or sets the date style.
     /// </summary>
     public int? DateStyle { get; set; }
@@ -104,73 +63,40 @@ internal sealed class DbosTupleDesc
     public int? EuroDates { get; set; }
 
     /// <summary>
-    /// Gets or sets the database character set.
-    /// </summary>
-    //public string DBCharset { get; set; }
-
-    /// <summary>
     /// Gets or sets a value indicating whether 24-hour time format is enabled.
     /// </summary>
     public bool? EnableTime24 { get; set; }
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="DbosTupleDesc"/> class.
-    /// </summary>
-    public DbosTupleDesc()
-    {
-        FieldType = new List<int>();
-        FieldSize = new List<int>();
-        FieldTrueSize = new List<int>();
-        FieldOffset = new List<int>();
-        FieldPhysField = new List<int>();
-        FieldLogField = new List<int>();
-        FieldNullAllowed = new List<bool>();
-        FieldFixedSize = new List<int>();
-        FieldSpringField = new List<int>();
-    }
-
-    /// <summary>
-    /// Pre-sizes the per-field lists once the field count is known, avoiding
-    /// repeated reallocations while parsing the descriptor (9 Add calls per field).
-    /// </summary>
-    internal void EnsureCapacity(int capacity)
-    {
-        if (capacity <= 0)
-            return;
-        FieldType.EnsureCapacity(capacity);
-        FieldSize.EnsureCapacity(capacity);
-        FieldTrueSize.EnsureCapacity(capacity);
-        FieldOffset.EnsureCapacity(capacity);
-        FieldPhysField.EnsureCapacity(capacity);
-        FieldLogField.EnsureCapacity(capacity);
-        FieldNullAllowed.EnsureCapacity(capacity);
-        FieldFixedSize.EnsureCapacity(capacity);
-        FieldSpringField.EnsureCapacity(capacity);
-    }
-
-    // Flat arrays used by the per-row decode hot path. List<T> indexers add a
-    // bounds check plus an indirection per field per row; arrays remove the
-    // indirection. Populated once by Freeze() after the descriptor is parsed.
+    // Flat per-field arrays filled directly while parsing the descriptor.
     internal int[] FieldTypeArr { get; private set; } = [];
     internal int[] FieldSizeArr { get; private set; } = [];
     internal int[] FieldTrueSizeArr { get; private set; } = [];
     internal int[] FieldOffsetArr { get; private set; } = [];
     internal int[] FieldPhysFieldArr { get; private set; } = [];
+    internal int[] FieldLogFieldArr { get; private set; } = [];
     internal bool[] FieldNullAllowedArr { get; private set; } = [];
     internal int[] FieldFixedSizeArr { get; private set; } = [];
+    internal int[] FieldSpringFieldArr { get; private set; } = [];
 
     /// <summary>
-    /// Materializes the hot-path arrays from the parsed lists. Must be called
-    /// after the row descriptor has been fully read.
+    /// Allocates the per-field arrays exactly once, after the field count has
+    /// been validated against the descriptor payload size.
     /// </summary>
-    internal void Freeze()
+    internal void Initialize(int fieldCount)
     {
-        FieldTypeArr = FieldType.ToArray();
-        FieldSizeArr = FieldSize.ToArray();
-        FieldTrueSizeArr = FieldTrueSize.ToArray();
-        FieldOffsetArr = FieldOffset.ToArray();
-        FieldPhysFieldArr = FieldPhysField.ToArray();
-        FieldNullAllowedArr = FieldNullAllowed.ToArray();
-        FieldFixedSizeArr = FieldFixedSize.ToArray();
+        if (fieldCount <= 0)
+        {
+            return;
+        }
+
+        FieldTypeArr = new int[fieldCount];
+        FieldSizeArr = new int[fieldCount];
+        FieldTrueSizeArr = new int[fieldCount];
+        FieldOffsetArr = new int[fieldCount];
+        FieldPhysFieldArr = new int[fieldCount];
+        FieldLogFieldArr = new int[fieldCount];
+        FieldNullAllowedArr = new bool[fieldCount];
+        FieldFixedSizeArr = new int[fieldCount];
+        FieldSpringFieldArr = new int[fieldCount];
     }
 }
