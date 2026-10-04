@@ -10,10 +10,10 @@ namespace JustyBase.NetezzaDriver.Benchmarks;
 [ShortRunJob]
 public class GetBytesBench
 {
-    [Params(100 * 1024, 1024 * 1024)]
+    [Params(100 * 1024, 1024 * 1024, 10 * 1024 * 1024)]
     public int TextLength { get; set; }
 
-    [Params(4 * 1024, 8 * 1024)]
+    [Params(4 * 1024, 8 * 1024, 64 * 1024)]
     public int ChunkSize { get; set; }
 
     private NzDataReader _reader = null!;

@@ -120,6 +120,123 @@ public sealed class NzReplayTests
         Assert.True(initialCapacity <= NzConnection.TmpBufferRetainCap);
     }
 
+    [Fact]
+    public async Task Replay_EarlyDispose_AfterOneRow_ConnectionReusable()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        using var connection = OpenConnection(server.Port);
+
+        connection.DiscardedRows = 0;
+        using (var command = connection.CreateCommand(fixture.Query))
+        using (var reader = command.ExecuteReader())
+        {
+            Assert.True(reader.Read());
+            // Dispose without consuming the rest: must drain via discard path.
+        }
+
+        Assert.True(connection.DiscardedRows > 0);
+
+        // Connection must be immediately reusable with correct results.
+        using (var command2 = connection.CreateCommand(fixture.Query))
+        using (var reader2 = command2.ExecuteReader())
+        {
+            int rows = 0;
+            while (reader2.Read())
+                rows++;
+            Assert.Equal(fixture.ExpectedRows, rows);
+        }
+    }
+
+    [Fact]
+    public async Task Replay_EarlyDispose_AfterTenRows_ConnectionReusable()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        using var connection = OpenConnection(server.Port);
+
+        using (var command = connection.CreateCommand(fixture.Query))
+        using (var reader = command.ExecuteReader())
+        {
+            for (int i = 0; i < 10; i++)
+                Assert.True(reader.Read());
+        }
+
+        using (var command2 = connection.CreateCommand(fixture.Query))
+        using (var reader2 = command2.ExecuteReader())
+        {
+            int rows = 0;
+            while (reader2.Read())
+                rows++;
+            Assert.Equal(fixture.ExpectedRows, rows);
+        }
+    }
+
+    [Fact]
+    public async Task Replay_SingleRow_ReturnsFirstRow_AndConnectionReusable()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        using var connection = OpenConnection(server.Port);
+
+        object? firstViaFullRead;
+        using (var full = connection.CreateCommand(fixture.Query))
+        using (var r = full.ExecuteReader())
+        {
+            Assert.True(r.Read());
+            firstViaFullRead = r.GetValue(0);
+        }
+
+        using (var single = connection.CreateCommand(fixture.Query))
+        using (var r = single.ExecuteReader(System.Data.CommandBehavior.SingleRow))
+        {
+            Assert.True(r.Read());
+            Assert.Equal(firstViaFullRead, r.GetValue(0));
+            // Second read must report no more rows without decoding the tail.
+            Assert.False(r.Read());
+        }
+
+        // ExecuteScalar (which uses SingleRow internally) over the same fixture.
+        using (var scalarCmd = connection.CreateCommand(fixture.Query))
+        {
+            var scalar = scalarCmd.ExecuteScalar();
+            Assert.Equal(firstViaFullRead, scalar);
+        }
+
+        // Connection still in sync for the next query.
+        using (var again = connection.CreateCommand(fixture.Query))
+        using (var r = again.ExecuteReader())
+        {
+            int rows = 0;
+            while (r.Read())
+                rows++;
+            Assert.Equal(fixture.ExpectedRows, rows);
+        }
+    }
+
+    [Fact]
+    public async Task Replay_EarlyDisposeAsync_AfterOneRow_ConnectionReusable()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        using var connection = OpenConnection(server.Port);
+
+        await using (var command = connection.CreateCommand(fixture.Query))
+        await using (var reader = await command.ExecuteReaderAsync())
+        {
+            Assert.True(await reader.ReadAsync());
+        }
+
+        await using (var command2 = connection.CreateCommand(fixture.Query))
+        await using (var reader2 = await command2.ExecuteReaderAsync())
+        {
+            int rows = 0;
+            while (await reader2.ReadAsync())
+                rows++;
+            Assert.Equal(fixture.ExpectedRows, rows);
+        }
+    }
+
     private static NzReplayServer StartServer(NzReplayFixture fixture) => NzReplayServer.Start(fixture);
 
     private static NzConnection OpenConnection(int port)

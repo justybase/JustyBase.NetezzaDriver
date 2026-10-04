@@ -174,3 +174,300 @@ Cached-plan render baseline:
 - 2 `byte[64]` params: Mean `1,725.3 ns`, Allocated `5280 B`, Gen0 `0.6294`.
 - Repeated cached plan + render, 20x10 named ints: Mean `14,051
 ...[truncated 9113 chars]
+---
+
+# Final targeted performance and correctness pass (2026-10-04)
+
+Scope: no broad refactor. Each item below was gated on correctness,
+measurable gain, allocation/retained-memory reduction, or less DB/network work.
+Unit suite after this pass: **130 passed, 0 failed** (`Category=Unit`;
+was 119 before; +11 new targeted tests). Live integration benches still
+require `NZ_DEV_HOST` and were not run; replay/loopback measurements below
+isolate client-side cost (no DB latency).
+
+Method for the drain numbers: replay fixtures over loopback
+(`NzReplayServer`, `dimdate.nzreplay.gz` 3652x19, `fact200k.nzreplay.gz`
+200000x7), best of 5, `GC.GetAllocatedBytesForCurrentThread` + wall time.
+"Before" for early-dispose = old `Close()` behavior (full decode of every
+remaining row, equivalent to a full read); "After" = new discard drain.
+Network bytes are still transferred (protocol requires drain to RFQ); the win
+is decode CPU + allocations.
+
+## P0. stackalloc bool[count] initialization (correctness)
+
+### Problem
+
+`NzParameterHelper.RenderNamed` used `stackalloc bool[count]` without
+clearing. Stack memory is uninitialized. A stale `true` hides an unused
+parameter (missing "provided but not used" error); behavior depends on prior
+stack contents.
+
+### Before
+
+No explicit init. Flaky by nature; repeated valid renders could leave `true`
+bits that mask a later unused-parameter error.
+
+### After
+
+`used.Clear()` immediately after the stackalloc/heap branch. One
+`Span.Clear` (zero cost for count<=128, single vectorized zero).
+
+### Change
+
+Correctness only; no perf claim.
+
+### Decision
+
+**ACCEPTED.** Regression tests: 50x valid+invalid interleaved renders
+(stackalloc branch) + 130-param heap-branch validation.
+
+## P1. Pool validation changed CommandTimeout (correctness)
+
+### Problem
+
+`NzConnectionPool.IsConnectionValidAsync` set `cmd.CommandTimeout = 5`, but
+`NzCommand.CommandTimeout` forwards to shared `NzConnection.CommandTimeout`.
+After an idle validation, the app's connection (e.g. 60 s) silently became
+5 s.
+
+### Before
+
+Probe permanently mutated the physical connection timeout.
+
+### After
+
+Save `connection.CommandTimeout`, `try` probe, `finally` restore. Covers
+success, failure (`return false`), and cancellation (rethrow) paths. No API
+change; per-command timeout redesign explicitly deferred as unsafe.
+
+### Change
+
+Correctness; one extra TimeSpan copy per validation (negligible vs a
+`SELECT 1` round trip).
+
+### Decision
+
+**ACCEPTED.** Tests: failure preserves 60 s, cancellation preserves 60 s,
+closed-connection short-circuit preserves timeout. Success path shares the
+same `finally`.
+
+## P2/P3. Fast discard drain + SingleRow (largest real win)
+
+### Problem
+
+`NzDataReader.Close()` drained via full `DoNextStep`/`ParseDbosTupleData`:
+`SELECT 200k; Read(); Dispose();` decoded 199999 unneeded rows (strings,
+numerics, dates, RowValue churn). `ExecuteDbDataReader(SingleRow)` ignored
+`behavior`, so `ExecuteScalar` paid the same.
+
+### Before (measured, new-code harness; old Close == full read)
+
+- dimdate full read all cols: ~7 ms, ~1130 KB.
+- fact200k full read all cols: ~36-37 ms, ~20320 KB (~20 MB).
+
+### After (new discard drain: framing+length validation, skip bytes, no decode)
+
+- dimdate read-1 + Dispose: ~0 ms, ~15.1 KB. Read-10 + Dispose: ~0 ms, ~16 KB.
+- dimdate ExecuteScalar: ~0 ms, ~15.1 KB.
+- fact200k read-1 + Dispose: ~9-11 ms, ~8.0 KB. Read-10: ~8-12 ms, ~8.4 KB.
+- fact200k ExecuteScalar: ~9-10 ms, ~8.2 KB.
+- `connection.DiscardedRows` counter confirms skipped rows; replay tests
+  assert reuse after early dispose (sync+async) and SingleRow/ExecuteScalar
+  correctness.
+
+### Change
+
+- dimdate early-dispose: time ~7 ms -> ~0 ms, alloc ~1130 KB -> ~15 KB
+  (**~99% alloc reduction**).
+- fact200k early-dispose: time ~37 ms -> ~9 ms (**~75% faster**; remainder is
+  mandatory socket transfer), alloc ~20320 KB -> ~8 KB (**~99.96%**).
+- Lazy first-col over dimdate (related): eager-first-col ~6-7 ms ->
+  lazy-first-col ~1-2 ms.
+
+Design: `NzReadBuffer.Discard/DiscardAsync` (chunked, no large alloc) +
+`SkipRowStandardPayload[/Async]`, `SkipDataRowPayload[/Async]` +
+`DoNextStepDiscardingRows[/Async]` (`discardRows` flag threads through the
+existing parser; non-row messages unchanged). `NzDataReader.Close`,
+`CloseAsyncCore`, and post-first-row `SingleRow` reads use it.
+`NzCommand.RequestedBehavior` carries `SingleRow` without API break.
+
+### Decision
+
+**ACCEPTED.** Benchmarks added: `Sync_Read1_Dispose`, `Sync_Read10_Dispose`,
+`Sync_ExecuteScalar` (both fixtures). Existing full-read benches are the
+"before".
+
+## P4. Deeper lazy decoding (generation counters / progressive offsets)
+
+### Problem
+
+`ParseLazyRow` still does `PrepareVariableFieldOffsets` (all varying fields)
++ `ResetForLazyDecode` for every column: O(columns) per row even when 1 of
+100 is read.
+
+### Before
+
+Lazy first-col already wins (dimdate eager-first ~6-7 ms -> lazy ~1-2 ms,
+alloc ~102 KB -> ~100 KB). Remaining O(columns) is mem writes + offset scan,
+small vs actual decode.
+
+### After
+
+No code change in this pass.
+
+### Change
+
+Not implemented; estimated gain small (<10% on 19-col fixture) vs state
+machine risk (partial-scan resume, generation wrap, per-column metadata
+growth).
+
+### Decision
+
+**REJECTED (keep benchmark, document).** Existing
+`Sync_FirstColumn[_Lazy]`/`Sync_TwoColumns[_Lazy]` benches remain the harness
+for 20/50/100-col follow-ups.
+
+## P5. SequentialAccess
+
+### Problem
+
+`SequentialAccess` is accepted but ignored; could enable progressive offsets,
+less caching, streaming GetBytes.
+
+### After
+
+No behavior change. `SingleRow` fast path covers the highest-value
+sequential case. Arbitrary backwards access still works in all modes.
+
+### Decision
+
+**REJECTED (no complexity without measured need).** Npgsql-style
+`SeekToColumn` deferred until a replay benchmark shows material gain.
+
+## P6. Release lazy oversize buffer on pool return
+
+### Problem
+
+`_lazyOversizeBuffer` (ArrayPool, potentially multi-MB) + `_lazyRowMemory` /
+`_lazyRowActive` survived `ReturnAsync`, which only called
+`ReleaseScratchBuffers` (`_largeReadBuffer`). Idle pooled connections pinned
+transient row memory.
+
+### Before
+
+Oversize lazy row retained across pool idle.
+
+### After
+
+`ReleaseScratchBuffers()` now forwards to unified `ReleaseTransientBuffers()`:
+returns `_largeReadBuffer`, returns `_lazyOversizeBuffer`, clears
+`_lazyRowMemory`/`_lazyRowActive`. Persistent `NzReadBuffer` untouched.
+`Close/CloseAsync` behavior unchanged (already cleared).
+
+### Change
+
+Retained-memory fix; steady-state time/alloc unchanged by design.
+
+### Decision
+
+**ACCEPTED.** Test simulates oversize transient state, asserts
+`ReleaseScratchBuffers` clears it and is idempotent.
+
+## P7. ConnectionValidationInterval=0 round trip
+
+### Problem
+
+`ToString()` omitted the property when `<= 0`, so explicit `0` (validate
+every checkout) serialized to nothing and re-parsed as default 30.
+
+### Before
+
+`builder.ConnectionValidationInterval = 0; builder.ToString()` lost the 0.
+
+### After
+
+Always emits `ConnectionValidationInterval=...` (0, 30, 45 all survive
+`ParseConnectionString`). `ParseConnectionString` made `internal` for the
+round-trip test.
+
+### Decision
+
+**ACCEPTED.** Round-trip test for 0/45/default.
+
+## P8. Cap large GetBytes cache retention
+
+### Problem
+
+`_getBytesCache` rents up to the full encoded value and holds it to reader
+dispose. For 10-100 MB values this pins megabytes.
+
+### After
+
+No threshold implemented in this pass. Retention is bounded by reader
+lifetime, and the row's own string is retained anyway (same order). Chunk
+params extended (10 MB, 64 KB) so the trade-off can be measured properly
+later. Incremental-`Encoder` alternative noted but not implemented (must
+preserve byte-offset split semantics).
+
+### Decision
+
+**REJECTED (keep benchmark, no threshold picked arbitrarily).**
+
+## P9. Cache named parameter bindings
+
+### Problem
+
+Hash table for >8 params is rebuilt per render. Caching
+placeholder->index across renders could help 16-64 param repeated executes,
+but `ParameterName` mutation/collection edits require invalidation (stale
+binding = wrong SQL).
+
+### After
+
+Not implemented. Template plan is already cached; per-render hash build is
+one `Rent` + O(n) FNV + O(placeholders) probes. Added sizing probe benchmark
+(`Render_SizedNamed_Repeated`, 8/16/32/64 x20 renders) for future decision.
+
+### Decision
+
+**REJECTED (benchmark added, not worth invalidation risk on current data).**
+
+## P10. Dead code
+
+### Problem
+
+`CreateCommandTimeoutTokenSource` coexisted unused alongside
+`TryGetCommandTimeoutToken` (compiler-confirmed zero callers; public surface
+unaffected).
+
+### After
+
+Removed. No other dead infra removed (buffer/parse/metadata helpers all have
+callers).
+
+### Decision
+
+**ACCEPTED (removal only).**
+
+## P11. Explicitly not touched
+
+Numeric conversion, primitive getters, length-validation fast paths, ArrayPool
+ownership, ValueStringBuilder, NzReadBuffer primitives, GetFieldValue<T>,
+UTF-8 query encoding, descriptor arrays, string pooling: no changes (no
+regression signal). No unsafe/SIMD/custom allocators added.
+
+---
+
+## Remaining bottlenecks / do-not-touch-without-profiling
+
+1. Socket transfer during drain: early-dispose still reads all bytes to RFQ
+   (fact200k ~9 ms floor). Further wins need server-side cancellation
+   (`CancelQuery`) or `CommandBehavior.CloseConnection` semantics, not client
+   decode tweaks.
+2. Wide-row lazy residual O(columns) (P4): needs 50/100-col fixtures before
+   any generation/progressive-offset work.
+3. `GetBytes` >4 MB retention (P8): needs incremental-encoder benchmark.
+4. Named binding cache (P9): needs BDN numbers from the new probe.
+5. Per-command timeout architecture (P1 follow-up): `NzCommand` timeout is
+   still shared via `NzConnection`; making it per-command is an API/behavior
+   change requiring compat review.

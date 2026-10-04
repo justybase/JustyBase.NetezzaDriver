@@ -130,4 +130,57 @@ public sealed class ParameterPlanTests
         var c = new NzParameterCollection();
         Assert.Same(sql, NzParameterHelper.SubstituteParameters(sql, c));
     }
+
+    [Fact]
+    public void Render_Named_StackallocUsedArray_IsZeroInitialized_RepeatedRenders()
+    {
+        // Regression test for stackalloc bool[count] without explicit Clear():
+        // uninitialized stack memory must not leak between renders. The
+        // stackalloc branch (count <= 128) is exercised here; repeated valid
+        // renders (all used=true) must not cause a subsequent render with an
+        // unused parameter to silently pass, nor cause a valid render to
+        // falsely report "provided but not used".
+        const string sql = "SELECT * FROM t WHERE a=:p0 AND b=:p1 AND c=:p2";
+        var plan = NzParameterHelper.ParseTemplate(sql);
+
+        for (int iter = 0; iter < 50; iter++)
+        {
+            // Valid render: all parameters used, must never throw.
+            var valid = Named(("p0", iter), ("p1", iter + 1), ("p2", iter + 2));
+            string rendered = NzParameterHelper.RenderWithPlan(sql, plan, valid);
+            Assert.Contains(iter.ToString(), rendered, StringComparison.Ordinal);
+
+            // Invalid render: extra unused parameter must ALWAYS throw,
+            // even right after a valid render left stack memory full of true.
+            var withExtra = Named(("p0", 1), ("p1", 2), ("p2", 3), ("unused", 4));
+            var ex = Assert.Throws<InvalidOperationException>(() =>
+                NzParameterHelper.RenderWithPlan(sql, plan, withExtra));
+            Assert.Contains("not used", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void Render_Named_HeapUsedArray_LargeCount_StillValidatesUnused()
+    {
+        // Exercise the heap branch (count > 128).
+        var sb = new System.Text.StringBuilder("SELECT ");
+        var items = new List<(string Name, object? Value)>();
+        for (int i = 0; i < 130; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append($":p{i}");
+            items.Add(($"p{i}", i));
+        }
+        string sql = sb.ToString();
+        var plan = NzParameterHelper.ParseTemplate(sql);
+        var all = new NzParameterCollection();
+        foreach (var (name, value) in items)
+            all.Add(new NzParameter(name, value));
+        string rendered = NzParameterHelper.RenderWithPlan(sql, plan, all);
+        Assert.Contains("129", rendered, StringComparison.Ordinal);
+
+        all.Add(new NzParameter("unused", 1));
+        Assert.Throws<InvalidOperationException>(() =>
+            NzParameterHelper.RenderWithPlan(sql, plan, all));
+    }
 }

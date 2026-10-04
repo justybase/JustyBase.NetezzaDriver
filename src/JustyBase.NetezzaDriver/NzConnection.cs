@@ -162,7 +162,7 @@ public sealed class NzConnection : DbConnection
     /// <param name="connectionString">Connection string in format "User=value;Password=value" or "User=value;Password={value;with;semicolons}"</param>
     /// <returns>A tuple containing connection parameters</returns>
     /// <exception cref="NetezzaException">Thrown when mandatory parameters are missing or format is invalid</exception>
-    private static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime, int ConnectionValidationInterval) ParseConnectionString(string connectionString)
+    internal static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime, int ConnectionValidationInterval) ParseConnectionString(string connectionString)
     {
         var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int position = 0;
@@ -602,6 +602,11 @@ public sealed class NzConnection : DbConnection
     private bool _protocolFaulted;
     private long _protocolRowNumber;
     private long _currentProtocolRowNumber;
+    /// <summary>
+    /// Number of row payloads skipped via the fast discard path (no decode).
+    /// Used by benchmarks to quantify early-dispose savings.
+    /// </summary>
+    internal long DiscardedRows;
     protected override void Dispose(bool disposing)
     {
         if (_disposed)
@@ -1301,18 +1306,6 @@ public sealed class NzConnection : DbConnection
 
     private CancellationTokenSource? _cachedTimeoutCts;
 
-    private CancellationTokenSource? CreateCommandTimeoutTokenSource(CancellationToken cancellationToken)
-    {
-        if (CommandTimeout <= TimeSpan.Zero || CommandTimeout == Timeout.InfiniteTimeSpan)
-        {
-            return null;
-        }
-
-        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        linkedCts.CancelAfter(CommandTimeout);
-        return linkedCts;
-    }
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool TryGetCommandTimeoutToken(
         CancellationToken callerToken,
@@ -1514,6 +1507,53 @@ public sealed class NzConnection : DbConnection
             {
                 await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
                 res = await IntepretReturnedByteAsync(nzCommand, cancellationToken).ConfigureAwait(false);
+            }
+            throw CreateCurrentException();
+        }
+        return res;
+    }
+
+    /// <summary>
+    /// Drain path for rows the caller will never consume (early close,
+    /// <c>SingleRow</c> tail). Framing, length validation, and non-row state
+    /// machines are identical to <see cref="DoNextStep"/>; only
+    /// <c>RowStandard</c>/<c>DataRow</c> payloads are skipped without decode.
+    /// </summary>
+    internal bool DoNextStepDiscardingRows(NzCommand nzCommand)
+    {
+        ThrowIfProtocolFaulted();
+        if (_shouldReadByte)
+        {
+            ReadNextResponseByte();
+        }
+        var res = IntepretReturnedByte(nzCommand, discardRows: true);
+        if (_error != null)
+        {
+            while (res && _shouldReadByte)
+            {
+                ReadNextResponseByte();
+                res = IntepretReturnedByte(nzCommand, discardRows: true);
+            }
+            throw CreateCurrentException();
+        }
+        return res;
+    }
+
+    internal async ValueTask<bool> DoNextStepDiscardingRowsAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
+    {
+        ThrowIfProtocolFaulted();
+        if (_shouldReadByte)
+        {
+            await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var res = await IntepretReturnedByteAsync(nzCommand, cancellationToken, discardRows: true).ConfigureAwait(false);
+        if (_error != null)
+        {
+            while (res && _shouldReadByte)
+            {
+                await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
+                res = await IntepretReturnedByteAsync(nzCommand, cancellationToken, discardRows: true).ConfigureAwait(false);
             }
             throw CreateCurrentException();
         }
@@ -1921,7 +1961,7 @@ public sealed class NzConnection : DbConnection
         }
     }
 
-    private bool IntepretReturnedByte(NzCommand nzCommand)
+    private bool IntepretReturnedByte(NzCommand nzCommand, bool discardRows = false)
     {
         _shouldReadByte = true;
         if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -1988,9 +2028,16 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.DataRow)//read rows in schema/system queries - hot path
         {
-            int length = ReadProtocolLength("dataRowPayloadLength");
-            var data = ReadMessagePayload(length);
-            HandleDataRow(data, nzCommand); 
+            if (discardRows)
+            {
+                SkipDataRowPayload();
+            }
+            else
+            {
+                int length = ReadProtocolLength("dataRowPayloadLength");
+                var data = ReadMessagePayload(length);
+                HandleDataRow(data, nzCommand);
+            }
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescriptionStandard)// metadata for standard query, occurs after BackendMessageCode.RowDescription
         {
@@ -2002,7 +2049,10 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowStandard)//!!!!!!, main hot path - read rows
         {
-            ResReadDbosTuple(nzCommand);
+            if (discardRows)
+                SkipRowStandardPayload();
+            else
+                ResReadDbosTuple(nzCommand);
             //Thread.Sleep(50);
             //doContinue = true;
         }
@@ -2064,7 +2114,7 @@ public sealed class NzConnection : DbConnection
         return true;
     }
 
-    private async ValueTask<bool> IntepretReturnedByteAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
+    private async ValueTask<bool> IntepretReturnedByteAsync(NzCommand nzCommand, CancellationToken cancellationToken = default, bool discardRows = false)
     {
         _shouldReadByte = true;
         if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -2131,11 +2181,18 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.DataRow)
         {
-            int length = await ReadProtocolLengthAsync(
-                "dataRowPayloadLength",
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
-            HandleDataRow(data, nzCommand);
+            if (discardRows)
+            {
+                await SkipDataRowPayloadAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                int length = await ReadProtocolLengthAsync(
+                    "dataRowPayloadLength",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
+                HandleDataRow(data, nzCommand);
+            }
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescriptionStandard)
         {
@@ -2148,7 +2205,10 @@ public sealed class NzConnection : DbConnection
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowStandard)
         {
-            await ResReadDbosTupleAsync(nzCommand, cancellationToken).ConfigureAwait(false);
+            if (discardRows)
+                await SkipRowStandardPayloadAsync(cancellationToken).ConfigureAwait(false);
+            else
+                await ResReadDbosTupleAsync(nzCommand, cancellationToken).ConfigureAwait(false);
         }
         else if (_lastResponse is (byte)'u' or (byte)'U' or (byte)'l' or (byte)'x')
         {
@@ -3053,6 +3113,73 @@ public sealed class NzConnection : DbConnection
     private void ParseCurrentDbosTuple(NzCommand nzCommand, int payloadLength, int numFields)
         => ParseDbosTupleData(nzCommand, _readBuffer!.ReadSpan(payloadLength), numFields);
 
+    /// <summary>
+    /// Fast discard for a <c>RowStandard</c> payload: validates framing exactly
+    /// like <see cref="ResReadDbosTuple"/> but skips the bytes without calling
+    /// <see cref="ParseDbosTupleData"/>. No strings, numerics, dates, or
+    /// <c>RowValue</c> updates are performed.
+    /// </summary>
+    private void SkipRowStandardPayload()
+    {
+        _currentProtocolRowNumber = ++_protocolRowNumber;
+        int rowLength = ReadProtocolLength("rowStandard.rowLength");
+        int payloadLength = ReadProtocolLength("rowStandard.dbosPayloadLength", allowZero: false);
+
+        // The previous lazy row (if any) is no longer needed once we move on.
+        if (_lazyRowActive)
+        {
+            ReleaseLazyOversize();
+            _lazyRowMemory = default;
+            _lazyRowActive = false;
+        }
+        // A previous large DataRow payload must not be pinned while draining.
+        ReleaseLargeReadBuffer();
+
+        _readBuffer!.Discard(payloadLength);
+        DiscardedRows++;
+    }
+
+    private async ValueTask SkipRowStandardPayloadAsync(CancellationToken cancellationToken)
+    {
+        _currentProtocolRowNumber = ++_protocolRowNumber;
+        int rowLength = await ReadProtocolLengthAsync(
+            "rowStandard.rowLength",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        int payloadLength = await ReadProtocolLengthAsync(
+            "rowStandard.dbosPayloadLength",
+            allowZero: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (_lazyRowActive)
+        {
+            ReleaseLazyOversize();
+            _lazyRowMemory = default;
+            _lazyRowActive = false;
+        }
+        ReleaseLargeReadBuffer();
+
+        await _readBuffer!.DiscardAsync(payloadLength, cancellationToken).ConfigureAwait(false);
+        DiscardedRows++;
+    }
+
+    private void SkipDataRowPayload()
+    {
+        int length = ReadProtocolLength("dataRowPayloadLength");
+        ReleaseLargeReadBuffer();
+        _readBuffer!.Discard(length);
+        DiscardedRows++;
+    }
+
+    private async ValueTask SkipDataRowPayloadAsync(CancellationToken cancellationToken)
+    {
+        int length = await ReadProtocolLengthAsync(
+            "dataRowPayloadLength",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ReleaseLargeReadBuffer();
+        await _readBuffer!.DiscardAsync(length, cancellationToken).ConfigureAwait(false);
+        DiscardedRows++;
+    }
+
     private void ParseDbosTupleData(NzCommand nzCommand, ReadOnlySpan<byte> data, int numFields)
     {
 
@@ -3506,16 +3633,47 @@ public sealed class NzConnection : DbConnection
 
     /// <summary>
     /// Releases the transient buffer used for payloads above
-    /// <see cref="TmpBufferRetainCap"/>. Safe to call when no message payload is
-    /// being processed.
+    /// <see cref="TmpBufferRetainCap"/>, plus any retained lazy-row oversize
+    /// buffer. Safe to call when no message payload is being processed.
+    /// A pooled connection must not pin a multi-megabyte row buffer while idle.
+    /// Does not release the persistent <see cref="NzReadBuffer"/>.
     /// </summary>
     internal void ReleaseScratchBuffers()
+        => ReleaseTransientBuffers();
+
+    /// <summary>
+    /// Unified cleanup for per-query transient memory: large message buffer,
+    /// lazy oversize row buffer, and lazy row lifetime. Called when a physical
+    /// connection is returned to the pool.
+    /// </summary>
+    internal void ReleaseTransientBuffers()
     {
         var buffer = _largeReadBuffer;
         if (buffer is not null)
         {
             _largeReadBuffer = null;
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        ReleaseLazyOversize();
+        _lazyRowMemory = default;
+        _lazyRowActive = false;
+    }
+
+    internal bool HasTransientBuffersForTests =>
+        _largeReadBuffer is not null || _lazyOversizeBuffer is not null || _lazyRowActive;
+
+    internal void SimulateTransientBuffersForTests(int oversizeBytes)
+    {
+        if (oversizeBytes > 0)
+        {
+            byte[] lazyRented = System.Buffers.ArrayPool<byte>.Shared.Rent(oversizeBytes);
+            _lazyOversizeBuffer = lazyRented;
+            _lazyRowMemory = lazyRented.AsMemory(0, oversizeBytes);
+            _lazyRowActive = true;
+
+            byte[] largeRented = System.Buffers.ArrayPool<byte>.Shared.Rent(oversizeBytes);
+            _largeReadBuffer = largeRented;
         }
     }
 

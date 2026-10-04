@@ -283,6 +283,124 @@ public class PoolUnitTests
         builder.ConnectionValidationInterval = 45;
         Assert.Contains("ConnectionValidationInterval=45", builder.ToString());
     }
+
+    [Fact]
+    public async Task PoolValidation_PreservesCommandTimeout_OnFailure()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass");
+        try
+        {
+            using var connection = new NzConnection("user", "pass", "host", "db");
+            connection.SetState(System.Data.ConnectionState.Open);
+            var original = TimeSpan.FromSeconds(60);
+            connection.CommandTimeout = original;
+
+            // No real server: validation fails internally and returns false,
+            // but must not leak the 5s probe timeout.
+            Assert.False(await pool.IsConnectionValidAsync(connection, CancellationToken.None));
+            Assert.Equal(original, connection.CommandTimeout);
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task PoolValidation_PreservesCommandTimeout_OnCancellation()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass");
+        try
+        {
+            using var connection = new NzConnection("user", "pass", "host", "db");
+            connection.SetState(System.Data.ConnectionState.Open);
+            var original = TimeSpan.FromSeconds(60);
+            connection.CommandTimeout = original;
+
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => pool.IsConnectionValidAsync(connection, cts.Token));
+            Assert.Equal(original, connection.CommandTimeout);
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task PoolValidation_DoesNotTouchTimeout_WhenNotOpen()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass");
+        try
+        {
+            using var connection = new NzConnection("user", "pass", "host", "db");
+            var original = TimeSpan.FromSeconds(42);
+            connection.CommandTimeout = original;
+            // Closed connection short-circuits before creating the probe command.
+            Assert.False(await pool.IsConnectionValidAsync(connection, CancellationToken.None));
+            Assert.Equal(original, connection.CommandTimeout);
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public void ConnectionValidationInterval_Zero_RoundTripsThroughConnectionString()
+    {
+        var builder = new NzConnectionStringBuilder
+        {
+            Host = "h",
+            Database = "d",
+            UserName = "u",
+            Password = "p",
+            ConnectionValidationInterval = 0
+        };
+        string cs = builder.ToString();
+        Assert.Contains("ConnectionValidationInterval=0", cs);
+
+        var parsed = NzConnection.ParseConnectionString(cs);
+        Assert.Equal(0, parsed.ConnectionValidationInterval);
+
+        // Non-zero values keep working too.
+        builder.ConnectionValidationInterval = 45;
+        string cs45 = builder.ToString();
+        Assert.Contains("ConnectionValidationInterval=45", cs45);
+        Assert.Equal(45, NzConnection.ParseConnectionString(cs45).ConnectionValidationInterval);
+
+        // Default (30) is also persisted explicitly now.
+        var defaults = new NzConnectionStringBuilder
+        {
+            Host = "h",
+            Database = "d",
+            UserName = "u",
+            Password = "p"
+        };
+        Assert.Contains(
+            $"ConnectionValidationInterval={NzConnectionStringBuilder.DefaultConnectionValidationInterval}",
+            defaults.ToString());
+    }
+
+    [Fact]
+    public void ReleaseTransientBuffers_ClearsLazyOversizeAndLargeBuffer()
+    {
+        using var connection = new NzConnection("user", "pass", "host", "db");
+        Assert.False(connection.HasTransientBuffersForTests);
+
+        connection.SimulateTransientBuffersForTests(4096);
+        Assert.True(connection.HasTransientBuffersForTests);
+
+        // This is what the pool calls when a physical connection goes idle.
+        connection.ReleaseScratchBuffers();
+        Assert.False(connection.HasTransientBuffersForTests);
+
+        // Idempotent: safe to call again with nothing retained.
+        connection.ReleaseTransientBuffers();
+        Assert.False(connection.HasTransientBuffersForTests);
+    }
 }
 
 [Trait("Category", "Integration")]

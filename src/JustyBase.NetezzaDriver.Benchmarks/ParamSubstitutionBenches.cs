@@ -121,4 +121,26 @@ public class ParamSubstitutionBenches
             r = NzParameterHelper.RenderWithPlan(_tenNamedSql, _cachedTenNamedPlan, _tenNamed);
         return r;
     }
+
+    [Params(8, 16, 32, 64)]
+    public int NamedParamCount { get; set; }
+
+    [Benchmark(Description = "repeated render N named (binding probe)")]
+    public string Render_SizedNamed_Repeated()
+    {
+        var sb = new StringBuilder("SELECT ");
+        var c = new NzParameterCollection();
+        for (int i = 0; i < NamedParamCount; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append(":p" + i);
+            c.Add(new NzParameter("p" + i, i));
+        }
+        string sql = sb.ToString();
+        var plan = NzParameterHelper.ParseTemplate(sql);
+        string r = string.Empty;
+        for (int i = 0; i < 20; i++)
+            r = NzParameterHelper.RenderWithPlan(sql, plan, c);
+        return r;
+    }
 }

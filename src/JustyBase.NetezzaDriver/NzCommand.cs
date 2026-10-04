@@ -83,6 +83,12 @@ public sealed class NzCommand : DbCommand
     private string? _cachedParamSql;
     private NzParameterHelper.SqlTemplatePlan? _cachedParamPlan;
 
+    /// <summary>
+    /// Behavior requested by the last ExecuteReader call. Used to honor
+    /// <see cref="CommandBehavior.SingleRow"/> without changing the public API.
+    /// </summary>
+    internal CommandBehavior RequestedBehavior { get; private set; } = CommandBehavior.Default;
+
     internal int _recordsAffected = -1;
 
     internal string GetName(int fieldNum)
@@ -293,6 +299,7 @@ public sealed class NzCommand : DbCommand
     {
         try
         {
+            RequestedBehavior = behavior;
             Clear();
             var resolvedSql = ResolveCommandText(CommandText);
             if (!_connection.InTransaction && !_connection.AutoCommit)
@@ -323,6 +330,7 @@ public sealed class NzCommand : DbCommand
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
+            RequestedBehavior = behavior;
             Clear();
             var resolvedSql = ResolveCommandText(CommandText);
             if (!_connection.InTransaction && !_connection.AutoCommit)

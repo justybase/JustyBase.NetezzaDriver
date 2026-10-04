@@ -215,6 +215,40 @@ internal sealed class NzReadBuffer
         _consumed += count;
     }
 
+    /// <summary>
+    /// Discards <paramref name="count"/> protocol bytes without decoding them.
+    /// Unlike <see cref="Skip"/>, works for payloads larger than the buffer by
+    /// consuming them in buffer-sized chunks. Used to drain rows the caller
+    /// will never consume (early reader close, SingleRow).
+    /// </summary>
+    public void Discard(int count)
+    {
+        if (count < 0)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        while (count > 0)
+        {
+            int chunk = Math.Min(count, _buffer.Length);
+            Ensure(chunk);
+            _readPos += chunk;
+            _consumed += chunk;
+            count -= chunk;
+        }
+    }
+
+    public async ValueTask DiscardAsync(int count, CancellationToken cancellationToken = default)
+    {
+        if (count < 0)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        while (count > 0)
+        {
+            int chunk = Math.Min(count, _buffer.Length);
+            await EnsureAsync(chunk, cancellationToken).ConfigureAwait(false);
+            _readPos += chunk;
+            _consumed += chunk;
+            count -= chunk;
+        }
+    }
+
     private int DrainBuffered(Span<byte> destination)
     {
         int available = Math.Min(BytesBuffered, destination.Length);
