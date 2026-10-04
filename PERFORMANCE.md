@@ -709,3 +709,92 @@ kancelacją, 4 równoległe `DisposeAsync` w trakcie pracy. Finał:
 ---
 
 ## DO NOT TOUCH WITHOUT PROFILING.
+
+---
+
+# Pool atomicity/lifecycle pass (2026-10-04, cz. 4)
+
+Mały correctness pass w `NzConnectionPool`. Zero zmian w readerze,
+dekodowaniu, protokole, `NzReadBuffer`, `Numeric`, `GetFieldValue<T>`,
+parameter rendering, lazy, `SequentialAccess`, `ValueStringBuilder`,
+ArrayPool. Unit: **141 passed, 0 failed** (było 139; +2 nowe testy).
+
+## 1. RentAsync: rejestracja active zsynchronizowana z teardownem
+
+### Problem
+
+Po udanym `CreateConnectionAsync` (lub pobraniu z idle) rejestracja
+`_active.TryAdd` była bez synchronizacji. Raczej: Open kończy się, a
+`DisposeAsync` zdąży zrobić reap + zamknąć primitives, po czym rent dodawał
+świeży wpis i zwracał connection z martwej puli — `TotalConnections == 1`
+po zakończeniu dispose.
+
+### Fix
+
+`TryRegisterActive(NzConnection)` pod `_disposeLock`: jeśli `_disposed` —
+`false`. Używane dla nowego connection i dla kandydata z idle. Przy
+porażce: `DisposeConnectionAsync` + `ReleaseReservation`/decrement +
+`ObjectDisposedException`.
+
+### Test
+
+`Rent_OpenCompletesAfterDispose_DoesNotRegister_NoLeak` (replay + hook
+`BeforeRegisterActiveForTests`): Open sukces, wstrzymanie przed rejestracją,
+teardown do końca, zwolnienie → rent rzuca ODE, connection `Closed`,
+`TotalConnections == 0`.
+
+## 2. DisposeAsync czeka na rozpoczęte ReturnAsync
+
+### Problem
+
+`ReturnAsync` od razu `_active.TryRemove`, potem rollback i oczekiwanie na
+`_idleLock`. `DisposeAsync` (widzące puste `_active`) mogło zakończyć się,
+gdy return wciąż trzymał physical connection i licznik.
+
+### Fix
+
+`_inFlightReturns` + `_returnsDrained` TCS; `ReturnAsync` inkrementuje na
+wejściu, dekrementuje w `finally` (przy 0 → `TrySetResult`).
+`DisposeCoreAsync` po `Cancel()` i czeka: `cancel → maintenance → wait
+in-flight returns → Clear idle → reap active → dispose primitives`.
+Rollback w returnie dostał `_disposeCts.Token`, żeby teardown nie czekał na
+długi rollback.
+
+### Test
+
+`DisposeAsync_WaitsForInFlightReturn` (hook `BeforeReturnCleanupForTests`):
+return wisi w połowie cleanupu, dispose nie kończy się przed zwolnieniem;
+po zwolnieniu `Total == Active == Idle == 0`, `DisposeCoreRunCount == 1`.
+
+## 3. (P2) Brak linked CTS przy `CancellationToken.None`
+
+### Problem
+
+`RentAsync` zawsze robił `CreateLinkedTokenSource(cancellationToken,
+_disposeCts.Token)` → CTS + registrations na każdy checkout.
+
+### Fix
+
+Gdy `!cancellationToken.CanBeCanceled`, `rentToken = _disposeCts.Token`
+bez alokacji; linked CTS tworzony tylko dla tokenu callera (i zwalniany w
+`finally`).
+
+### Benchmark (`PoolRentBench`, replay, ShortRun, `MemoryDiagnoser`)
+
+| Wariant | Mean | Allocated |
+|---|---:|---:|
+| `Rent+Return (CancellationToken.None)` (new) | 233.2 ns | **152 B** |
+| `Rent+Return (cancelable → linked CTS)` (old path) | 297.1 ns | 232 B |
+
+### Change
+
+Common path (None): **−80 B i ~−64 ns na Rent+Return** (~35% alokacji
+checkout). Wartość zależna od maszyny; liczy się kierunek i brak CTS.
+
+### Decision
+
+**ACCEPTED.**
+
+---
+
+## DO NOT TOUCH WITHOUT PROFILING.

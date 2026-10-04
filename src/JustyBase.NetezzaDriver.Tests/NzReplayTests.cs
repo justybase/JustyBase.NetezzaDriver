@@ -287,6 +287,50 @@ public sealed class NzReplayTests
     }
 
     [Fact]
+    public async Task Rent_OpenCompletesAfterDispose_DoesNotRegister_NoLeak()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "127.0.0.1",
+            Database = "JUST_DATA",
+            UserName = "replay",
+            Password = "replay",
+            Port = server.Port,
+            MaxPoolSize = 4,
+        });
+
+        var opened = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NzConnection? created = null;
+        pool.BeforeRegisterActiveForTests = async conn =>
+        {
+            created = conn;
+            opened.SetResult(true);
+            await release.Task.ConfigureAwait(false);
+        };
+
+        // Rent opens a connection, then stalls just before registering.
+        var rent = pool.RentAsync();
+        await opened.Task.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+        Assert.NotNull(created);
+
+        // Teardown completes while the rent is stalled (no active entry yet).
+        await pool.DisposeAsync();
+        Assert.Equal(0, pool.ActiveCount);
+
+        release.SetResult(true);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => rent);
+
+        // The late Open must not leave a registered connection or count slot.
+        Assert.Equal(System.Data.ConnectionState.Closed, created.State);
+        Assert.Equal(0, pool.TotalConnections);
+        Assert.Equal(0, pool.ActiveCount);
+        Assert.Equal(0, pool.IdleCount);
+    }
+
+    [Fact]
     public async Task MaintenanceRefill_CancelAfterOpen_DisposesAndReleases()
     {
         var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");

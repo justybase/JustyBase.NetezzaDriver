@@ -426,6 +426,44 @@ public class PoolUnitTests
     }
 
     [Fact]
+    public async Task DisposeAsync_WaitsForInFlightReturn()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, 2, 30, 0);
+        var connection = new NzConnection("user", "pass", "host", "db");
+        pool.TrackActiveForTests(connection);
+        Assert.Equal(1, pool.TotalConnections);
+
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pool.BeforeReturnCleanupForTests = _ =>
+        {
+            entered.TrySetResult(true);
+            return release.Task;
+        };
+
+        // Return has already removed the connection from _active and is
+        // still cleaning up when teardown starts.
+        var ret = Task.Run(() => pool.ReturnAsync(connection));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var dispose = Task.Run(async () => await pool.DisposeAsync());
+
+        // Teardown must not complete while the return is in flight.
+        var early = await Task.WhenAny(dispose, Task.Delay(300));
+        Assert.NotSame(dispose, early);
+
+        release.TrySetResult(true);
+        await ret;
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(1, pool.DisposeCoreRunCount);
+        Assert.Equal(0, pool.TotalConnections);
+        Assert.Equal(0, pool.ActiveCount);
+        Assert.Equal(0, pool.IdleCount);
+        connection.Dispose();
+    }
+
+    [Fact]
     public async Task ConcurrentDisposeAsync_AllAwaitFullTeardown_ExactlyOnce()
     {
         var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, 2, 30, 0);
