@@ -20,6 +20,23 @@ public sealed class NzDataReader : DbDataReader
 
     private DataTable? _schemaTable;
 
+    // Encoded-byte cache for repeated chunked GetBytes on the same string value.
+    private string? _getBytesCacheSource;
+    private byte[]? _getBytesCache;
+    private int _getBytesCacheLength;
+
+    private void ReleaseGetBytesCache()
+    {
+        var cache = _getBytesCache;
+        if (cache is not null)
+        {
+            _getBytesCache = null;
+            _getBytesCacheSource = null;
+            _getBytesCacheLength = 0;
+            System.Buffers.ArrayPool<byte>.Shared.Return(cache);
+        }
+    }
+
     public NzDataReader(NzCommand nzCommand) : this(nzCommand, initializeReader: true)
     {
     }
@@ -177,6 +194,7 @@ public sealed class NzDataReader : DbDataReader
         if (!_disposed && disposing)
         {
             Close();
+            ReleaseGetBytesCache();
             _disposed = true;
         }
         base.Dispose(disposing);
@@ -187,6 +205,7 @@ public sealed class NzDataReader : DbDataReader
         if (!_disposed)
         {
             await CloseAsyncCore(CancellationToken.None).ConfigureAwait(false);
+            ReleaseGetBytesCache();
             _disposed = true;
         }
         await base.DisposeAsync().ConfigureAwait(false);
@@ -468,7 +487,10 @@ public sealed class NzDataReader : DbDataReader
             if (length > buffer.Length - bufferOffset)
                 throw new ArgumentException("The sum of bufferOffset and length is larger than the buffer size.");
 
-            int totalBytes = encoding.GetByteCount(text);
+            // On a cache hit, reuse the byte count too; this keeps repeated
+            // chunked reads from rescanning the whole string per chunk.
+            bool cacheHit = ReferenceEquals(_getBytesCacheSource, text) && _getBytesCache is not null;
+            int totalBytes = cacheHit ? _getBytesCacheLength : encoding.GetByteCount(text);
             if (dataOffset >= totalBytes)
                 return 0;
 
@@ -481,22 +503,26 @@ public sealed class NzDataReader : DbDataReader
 
             // Chunked / offset reads: encode once into a pooled buffer and
             // slice bytes exactly (preserves legacy mid-char split semantics).
-            // Rent is returned immediately; no per-call Gen0 byte[].
-            byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(totalBytes);
-            try
+            // The encoded bytes are cached for the same string value so a value
+            // read in many chunks is encoded once instead of once per chunk.
+            if (!cacheHit)
             {
-                int encoded = encoding.GetBytes(text.AsSpan(), rented.AsSpan(0, totalBytes));
-                int availInner = encoded - (int)dataOffset;
-                if (availInner <= 0)
-                    return 0;
-                int copyInner = Math.Min(length, availInner);
-                rented.AsSpan((int)dataOffset, copyInner).CopyTo(buffer.AsSpan(bufferOffset, copyInner));
-                return copyInner;
+                if (_getBytesCache is null || _getBytesCache.Length < totalBytes)
+                {
+                    if (_getBytesCache is not null)
+                        System.Buffers.ArrayPool<byte>.Shared.Return(_getBytesCache);
+                    _getBytesCache = System.Buffers.ArrayPool<byte>.Shared.Rent(totalBytes);
+                }
+                _getBytesCacheLength = encoding.GetBytes(text.AsSpan(), _getBytesCache.AsSpan(0, totalBytes));
+                _getBytesCacheSource = text;
             }
-            finally
-            {
-                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
-            }
+
+            int availInner = _getBytesCacheLength - (int)dataOffset;
+            if (availInner <= 0)
+                return 0;
+            int copyInner = Math.Min(length, availInner);
+            _getBytesCache.AsSpan((int)dataOffset, copyInner).CopyTo(buffer.AsSpan(bufferOffset, copyInner));
+            return copyInner;
         }
 
         // Non-string: preserve legacy semantics (byte[] branch is currently dead
