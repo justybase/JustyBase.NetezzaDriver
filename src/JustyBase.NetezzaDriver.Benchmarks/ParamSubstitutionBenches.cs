@@ -17,6 +17,12 @@ public class ParamSubstitutionBenches
     private string _largeSql = null!;
     private NzParameterHelper.SqlTemplatePlan _cachedTenNamedPlan = null!;
     private string _tenNamedSql = null!;
+    private NzParameterCollection _mixed = null!;
+    private string _mixedSql = null!;
+    private NzParameterHelper.SqlTemplatePlan _mixedPlan = null!;
+    private NzParameterCollection _byteArrays = null!;
+    private string _byteSql = null!;
+    private NzParameterHelper.SqlTemplatePlan _bytePlan = null!;
 
     [GlobalSetup]
     public void Setup()
@@ -35,6 +41,26 @@ public class ParamSubstitutionBenches
         _largeSql = sb.ToString();
         _tenNamedSql = "SELECT * FROM t WHERE c0=:p0 AND c1=:p1 AND c2=:p2 AND c3=:p3 AND c4=:p4 AND c5=:p5 AND c6=:p6 AND c7=:p7 AND c8=:p8 AND c9=:p9";
         _cachedTenNamedPlan = NzParameterHelper.ParseTemplate(_tenNamedSql);
+
+        _mixed = Named(
+            ("i", 42),
+            ("l", 1234567890123L),
+            ("m", 3.14159265358979m),
+            ("dt", new DateTime(2024, 12, 25, 10, 30, 0, DateTimeKind.Unspecified)),
+            ("s", "it's a string"),
+            ("f", 1.5f),
+            ("d", 2.718281828459045d),
+            ("g", Guid.Parse("00112233-4455-6677-8899-aabbccddeeff")),
+            ("ts", TimeSpan.FromHours(5.5)),
+            ("b", true));
+        _mixedSql = "SELECT :i,:l,:m,:dt,:s,:f,:d,:g,:ts,:b";
+        _mixedPlan = NzParameterHelper.ParseTemplate(_mixedSql);
+
+        var payload = new byte[64];
+        for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
+        _byteArrays = Named(("b0", payload), ("b1", payload));
+        _byteSql = "SELECT :b0,:b1";
+        _bytePlan = NzParameterHelper.ParseTemplate(_byteSql);
     }
 
     private static NzParameterCollection Positional(params object?[] values)
@@ -71,6 +97,12 @@ public class ParamSubstitutionBenches
 
     [Benchmark(Description = "large SQL 50 refs")]
     public string Subst_LargeSql() => NzParameterHelper.SubstituteParameters(_largeSql, _tenNamed);
+
+    [Benchmark(Description = "cached: 10 mixed named")]
+    public string Render_MixedNamed_Cached() => NzParameterHelper.RenderWithPlan(_mixedSql, _mixedPlan, _mixed);
+
+    [Benchmark(Description = "cached: 2 byte[64] named")]
+    public string Render_ByteArrays_Cached() => NzParameterHelper.RenderWithPlan(_byteSql, _bytePlan, _byteArrays);
 
     [Benchmark(Baseline = true, Description = "repeated: reparse each execute (old)")]
     public string Subst_RepeatedReparse()

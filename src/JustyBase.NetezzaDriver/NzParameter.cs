@@ -153,7 +153,7 @@ public sealed class NzParameter : DbParameter
         return ValueToSqlLiteral(_value);
     }
 
-    internal void AppendSqlLiteral(System.Text.StringBuilder sb)
+    internal void AppendSqlLiteral(ref ValueStringBuilder sb)
     {
         var value = _value;
         if (value is null || value is DBNull)
@@ -168,91 +168,132 @@ public sealed class NzParameter : DbParameter
                 sb.Append(b ? "TRUE" : "FALSE");
                 return;
             case int i:
-                sb.Append(i.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, i);
                 return;
             case long l:
-                sb.Append(l.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, l);
                 return;
             case short s:
-                sb.Append(s.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, s);
                 return;
             case byte bt:
-                sb.Append(bt.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, bt);
                 return;
             case sbyte sbv:
-                sb.Append(sbv.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, sbv);
                 return;
             case ushort us:
-                sb.Append(us.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, us);
                 return;
             case uint ui:
-                sb.Append(ui.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, ui);
                 return;
             case ulong ul:
-                sb.Append(ul.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, ul);
                 return;
             case string str:
-                AppendStringLiteral(sb, str);
+                AppendStringLiteral(ref sb, str);
                 return;
             case char c:
-                AppendStringLiteral(sb, c.ToString());
+                AppendCharLiteral(ref sb, c);
                 return;
             case byte[] bytes:
                 sb.Append("x'");
-                foreach (var b in bytes)
-                    sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                AppendHex(ref sb, bytes);
                 sb.Append('\'');
                 return;
             case float f:
-                sb.Append(f.ToString("G", CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, f, "G");
                 return;
             case double d:
-                sb.Append(d.ToString("G", CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, d, "G");
                 return;
             case decimal m:
-                sb.Append(m.ToString(CultureInfo.InvariantCulture));
+                AppendFormattable(ref sb, m);
                 return;
             case DateTime dt:
-                sb.Append('\'');
-                sb.Append(dt.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture));
-                sb.Append('\'');
+                AppendQuoted(ref sb, dt, "yyyy-MM-dd HH:mm:ss.ffffff");
                 return;
             case DateOnly d:
-                sb.Append('\'');
-                sb.Append(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
-                sb.Append('\'');
+                AppendQuoted(ref sb, d, "yyyy-MM-dd");
                 return;
             case TimeOnly t:
-                sb.Append('\'');
-                sb.Append(t.ToString("HH:mm:ss", CultureInfo.InvariantCulture));
-                sb.Append('\'');
+                AppendQuoted(ref sb, t, "HH:mm:ss");
                 return;
             case TimeSpan ts:
-                sb.Append('\'');
-                sb.Append(ts.ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture));
-                sb.Append('\'');
+                AppendQuoted(ref sb, ts, @"hh\:mm\:ss");
                 return;
             case Guid g:
-                sb.Append('\'');
-                sb.Append(g.ToString("D"));
-                sb.Append('\'');
+                AppendQuoted(ref sb, g, "D");
                 return;
             default:
-                AppendStringLiteral(sb, value.ToString() ?? string.Empty);
+                AppendStringLiteral(ref sb, value.ToString() ?? string.Empty);
                 return;
         }
     }
 
-    private static void AppendStringLiteral(System.Text.StringBuilder sb, string s)
+    /// <summary>
+    /// Formats a value directly into a stack buffer and appends the resulting
+    /// characters, avoiding the intermediate <c>string</c> of <c>ToString()</c>.
+    /// </summary>
+    private static void AppendFormattable<T>(ref ValueStringBuilder sb, T value, ReadOnlySpan<char> format = default)
+        where T : ISpanFormattable
+    {
+        Span<char> buffer = stackalloc char[128];
+        if (value.TryFormat(buffer, out int written, format, CultureInfo.InvariantCulture))
+        {
+            sb.Append(buffer[..written]);
+        }
+        else
+        {
+            sb.Append(value.ToString(format.IsEmpty ? null : format.ToString(), CultureInfo.InvariantCulture));
+        }
+    }
+
+    private static void AppendQuoted<T>(ref ValueStringBuilder sb, T value, ReadOnlySpan<char> format)
+        where T : ISpanFormattable
     {
         sb.Append('\'');
-        foreach (char c in s)
+        AppendFormattable(ref sb, value, format);
+        sb.Append('\'');
+    }
+
+    private static void AppendHex(ref ValueStringBuilder sb, ReadOnlySpan<byte> bytes)
+    {
+        const string hex = "0123456789abcdef";
+        Span<char> pair = stackalloc char[2];
+        foreach (byte b in bytes)
         {
-            if (c == '\'')
-                sb.Append("''");
-            else
-                sb.Append(c);
+            pair[0] = hex[b >> 4];
+            pair[1] = hex[b & 0x0F];
+            sb.Append(pair);
         }
+    }
+
+    private static void AppendCharLiteral(ref ValueStringBuilder sb, char c)
+    {
+        sb.Append('\'');
+        if (c == '\'')
+            sb.Append("''");
+        else
+            sb.Append(c);
+        sb.Append('\'');
+    }
+
+    private static void AppendStringLiteral(ref ValueStringBuilder sb, string s)
+    {
+        sb.Append('\'');
+        int start = 0;
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (s[i] == '\'')
+            {
+                sb.Append(s.AsSpan(start, i - start));
+                sb.Append("''");
+                start = i + 1;
+            }
+        }
+        sb.Append(s.AsSpan(start));
         sb.Append('\'');
     }
 
@@ -294,10 +335,10 @@ public sealed class NzParameter : DbParameter
 
     private static string FormatByteArray(byte[] bytes)
     {
-        var sb = new System.Text.StringBuilder(bytes.Length * 2 + 2);
+        Span<char> initialBuffer = stackalloc char[32];
+        var sb = new ValueStringBuilder(initialBuffer);
         sb.Append("x'");
-        foreach (var b in bytes)
-            sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+        AppendHex(ref sb, bytes);
         sb.Append('\'');
         return sb.ToString();
     }
