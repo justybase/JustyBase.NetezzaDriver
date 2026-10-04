@@ -237,6 +237,204 @@ public sealed class NzReplayTests
         }
     }
 
+    [Fact]
+    public async Task Maintenance_CancelledToken_LosesNothing()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "127.0.0.1",
+            Database = "JUST_DATA",
+            UserName = "replay",
+            Password = "replay",
+            Port = server.Port,
+            MaxPoolSize = 4,
+        });
+        try
+        {
+            // Three genuinely idle physical connections (held at once so the
+            // pool cannot reuse a single one).
+            var leases = new List<PooledNzConnection>();
+            for (int i = 0; i < 3; i++)
+                leases.Add(await pool.RentAsync());
+            Assert.Equal(3, pool.TotalConnections);
+            foreach (var lease in leases)
+                await lease.DisposeAsync();
+            Assert.Equal(3, pool.IdleCount);
+
+            // Alternate cancelled and live maintenance passes: no pass may
+            // lose a connection — every counted slot stays owned.
+            for (int i = 0; i < 50; i++)
+            {
+                using var cancelled = new CancellationTokenSource();
+                cancelled.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                    () => pool.RunMaintenanceForTestsAsync(cancelled.Token));
+                Assert.Equal(3, pool.TotalConnections);
+                Assert.Equal(3, pool.IdleCount);
+
+                await pool.RunMaintenanceForTestsAsync();
+                Assert.Equal(pool.IdleCount + pool.ActiveCount, pool.TotalConnections);
+                Assert.Equal(3, pool.TotalConnections);
+                Assert.Equal(3, pool.IdleCount);
+            }
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task MaintenanceRefill_CancelAfterOpen_DisposesAndReleases()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "127.0.0.1",
+            Database = "JUST_DATA",
+            UserName = "replay",
+            Password = "replay",
+            Port = server.Port,
+            MaxPoolSize = 4,
+        });
+        try
+        {
+            int before = pool.TotalConnections;
+            var opened = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            NzConnection? created = null;
+            using var cts = new CancellationTokenSource();
+            pool.BeforeParkIdleForTests = async conn =>
+            {
+                created = conn;
+                opened.SetResult(true);
+                // Block until the test cancels: the cancellation lands after
+                // a successful Open but before the idle enqueue.
+                await Task.Delay(Timeout.Infinite, cts.Token).ConfigureAwait(false);
+            };
+
+            var park = pool.TryCreateAndParkIdleAsync(cts.Token);
+            Assert.True(await opened.Task.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false));
+            Assert.NotNull(created);
+            cts.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => park);
+
+            // Ownership rule: disposed connection, reservation released.
+            Assert.Equal(System.Data.ConnectionState.Closed, created.State);
+            Assert.Equal(before, pool.TotalConnections);
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task PoolLifecycle_Stress_RentReturnMaintenanceCancelDispose()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "127.0.0.1",
+            Database = "JUST_DATA",
+            UserName = "replay",
+            Password = "replay",
+            Port = server.Port,
+            MaxPoolSize = 4,
+            ConnectionValidationInterval = 0,
+            ConnectionIdleTimeout = 1,
+        });
+        var stop = new ManualResetEventSlim(false);
+
+        async Task Worker(int id)
+        {
+            var rnd = new Random(id * 7919 + 13);
+            while (!stop.IsSet)
+            {
+                PooledNzConnection? lease;
+                try
+                {
+                    using var opCts = new CancellationTokenSource();
+                    if (rnd.Next(10) == 0)
+                        opCts.Cancel();
+                    lease = await pool.RentAsync(opCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+
+                try
+                {
+                    using var cmd = lease.Connection.CreateCommand(fixture.Query);
+                    using var reader = cmd.ExecuteReader();
+                    int want = rnd.Next(1, 5);
+                    int n = 0;
+                    while (n < want && reader.Read())
+                    {
+                        _ = reader.GetValue(0);
+                        n++;
+                    }
+                }
+                finally
+                {
+                    // Must never throw (not even ODE): ReturnAsync is safe
+                    // against a concurrently disposed pool by design.
+                    await lease.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+        }
+
+        async Task Maintainer()
+        {
+            var rnd = new Random(1234);
+            while (!stop.IsSet)
+            {
+                try
+                {
+                    using var mcts = new CancellationTokenSource();
+                    if (rnd.Next(3) == 0)
+                        mcts.Cancel();
+                    await pool.RunMaintenanceForTestsAsync(mcts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+                await Task.Delay(5).ConfigureAwait(false);
+            }
+        }
+
+        var workers = Enumerable.Range(0, 6).Select(i => Task.Run(() => Worker(i))).ToArray();
+        var maints = Enumerable.Range(0, 2).Select(_ => Task.Run(Maintainer)).ToArray();
+
+        await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        // Tear down while workers/maintainers are still in flight.
+        var disposers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            await pool.DisposeAsync().ConfigureAwait(false);
+        })).ToArray();
+        await Task.WhenAll(disposers).ConfigureAwait(false);
+        stop.Set();
+        await Task.WhenAll(workers).ConfigureAwait(false);
+        await Task.WhenAll(maints).ConfigureAwait(false);
+
+        Assert.Equal(0, pool.TotalConnections);
+        Assert.Equal(0, pool.ActiveCount);
+        Assert.Equal(0, pool.IdleCount);
+        Assert.Equal(1, pool.DisposeCoreRunCount);
+    }
+
     private static NzReplayServer StartServer(NzReplayFixture fixture) => NzReplayServer.Start(fixture);
 
     private static NzConnection OpenConnection(int port)
