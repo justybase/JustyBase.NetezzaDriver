@@ -281,13 +281,13 @@ public sealed class NzConnection : DbConnection
     private const int _bufferSize = 65536; // 64 KB
 
     /// <summary>
-    /// Size of the application-level read buffer created on open. Benchmarks
-    /// (ReplayReaderBench, ReadBufferSizeBench) show 8-64 KB are statistically
-    /// identical on the decode hot path; 16 KB keeps typical Netezza rows on the
-    /// in-place decode path while using 4x less retained memory per connection.
+    /// Size of the application-level read buffer created on open. The 8-64 KB
+    /// sweep did not establish a robust throughput difference on the available
+    /// replay fixtures, while the smaller sizes increase use of the oversize
+    /// payload path for large rows; the default therefore stays at 64 KB.
     /// Internal so the trade-off can be measured without a public tuning knob.
     /// </summary>
-    internal int ReadBufferSize { get; set; } = 16 * 1024;
+    internal int ReadBufferSize { get; set; } = _bufferSize;
 
     private Stream Initialize(string host, int port, bool useBufferedStream = true, bool setSocketBufferSizes = false)
     {
