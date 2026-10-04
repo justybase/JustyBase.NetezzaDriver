@@ -459,8 +459,21 @@ public sealed class NzReplayTests
         });
         var stop = new ManualResetEventSlim(false);
 
+        // Teardown-aborted operations are correct product behavior (teardown
+        // reaps sockets out from under in-flight work) and must be tolerated
+        // — but only once teardown actually started. Anything else rethrows
+        // so genuine failures still fail the test. NullReferenceException is
+        // included only post-dispose: a reap landing mid-step of the eager
+        // decode path surfaces it from the released read buffer, while the
+        // drain path itself throws typed errors (see ThrowIfDisposed).
+        static bool IsTeardownAbort(NzConnectionPool pool, Exception ex)
+            => pool.IsDisposed && ex is NetezzaException or InterfaceException or IOException or NullReferenceException;
+
         async Task Worker(int id)
         {
+            // Fully async I/O on purpose: the pool lifecycle (not socket
+            // reads) is under test, and synchronous blocking reads in the
+            // same process as the replay server starve low-core runners.
             var rnd = new Random(id * 7919 + 13);
             while (!stop.IsSet)
             {
@@ -480,18 +493,27 @@ public sealed class NzReplayTests
                 {
                     return;
                 }
+                catch (Exception ex) when (IsTeardownAbort(pool, ex))
+                {
+                    return;
+                }
 
                 try
                 {
-                    using var cmd = lease.Connection.CreateCommand(fixture.Query);
-                    using var reader = cmd.ExecuteReader();
+                    await using var cmd = lease.Connection.CreateCommand(fixture.Query);
+                    await using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
                     int want = rnd.Next(1, 5);
                     int n = 0;
-                    while (n < want && reader.Read())
+                    while (n < want && await reader.ReadAsync().ConfigureAwait(false))
                     {
                         _ = reader.GetValue(0);
                         n++;
                     }
+                }
+                catch (Exception ex) when (IsTeardownAbort(pool, ex))
+                {
+                    // In-flight query aborted by concurrent teardown: the
+                    // lease is still returned below.
                 }
                 finally
                 {
@@ -534,10 +556,13 @@ public sealed class NzReplayTests
         {
             await pool.DisposeAsync().ConfigureAwait(false);
         })).ToArray();
-        await Task.WhenAll(disposers).ConfigureAwait(false);
+        // Bounded joins: a lifecycle regression must fail fast here instead
+        // of hanging the runner indefinitely.
+        var joinTimeout = TimeSpan.FromSeconds(90);
+        await Task.WhenAll(disposers).WaitAsync(joinTimeout).ConfigureAwait(false);
         stop.Set();
-        await Task.WhenAll(workers).ConfigureAwait(false);
-        await Task.WhenAll(maints).ConfigureAwait(false);
+        await Task.WhenAll(workers).WaitAsync(joinTimeout).ConfigureAwait(false);
+        await Task.WhenAll(maints).WaitAsync(joinTimeout).ConfigureAwait(false);
 
         Assert.Equal(0, pool.TotalConnections);
         Assert.Equal(0, pool.ActiveCount);

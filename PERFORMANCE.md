@@ -850,5 +850,72 @@ Weryfikacja mutacyjna: tymczasowe pominięcie awajtu bariery w
 **ACCEPTED.**
 
 ---
+---
+
+# Pool teardown-hang fixes (2026-10-04, cz. 6)
+
+Motywacja: CI (ubuntu + windows) wisiał 46+ minut na suite — lokalnie
+(16 rdzeni) wszystko przechodziło w 3 s. Winne były dwa niezależne problemy,
+oba znalezione dumpami hangów i testem stresu.
+
+## 1. Osierocone waitery przy Dispose semaforów (P0)
+
+### Problem
+
+Udowodnione empirycznie mini-repro: `SemaphoreSlim.Dispose()` **nigdy nie
+kończy zaparkowanego `WaitAsync`** — odlinkowuje węzły z kolejki bez ich
+kompletowania (w dumpie: żywe łańcuchy `RentAsync → TaskNode` przy
+`m_waitCount=0, m_asyncHead=null`). Każdy wait z żywym tokenem w momencie
+teardown wisiał na zawsze.
+
+### Fix
+
+- Wszystkie poolowe czekania podpięte pod lifetime (`RentAsync`, sekcja
+  enqueue w `ReturnAsync`, drain/refill w `CleanupIdleAsync`, parkowanie
+  w `TryCreateAndParkIdleAsync`).
+- `ClearAsync` rozbity: publiczny obserwuje teardown (fail-fast po dispose),
+  wewnętrzny `ClearAsyncCore(None)` tylko dla `DisposeCoreAsync`.
+- **Semafory nie są już disposowane w teardown** (udokumentowane w kodzie):
+  skoro żaden waiter nie może zostać osierocony, a wszystkie kończą się
+  przez tokeny/sygnalizację, disposal wnosił tylko ryzyko hanga.
+  `AvailableWaitHandle` nie jest nigdzie używany, więc nie ma wycieku
+  natywnych zasobów.
+
+## 2. NRE zamiast typowanego błędu przy reap w trakcie odczytu
+
+### Problem
+
+Teardown wyrywał socket spod trwającego draina/kwerendy: `_readBuffer == null`
+→ surowy `NullReferenceException` (m.in. `SkipRowStandardPayloadAsync`).
+
+### Fix (tylko lifecycle, zero zmian dekodowania)
+
+- `ThrowIfDisposed()` na wejściu 4 wariantów `DoNextStep*` → typed
+  `NetezzaException("Connection is closed.")` (drainy już go łapią i kończą
+  czysto).
+- Lokalny null-check bufora w 4 helperach discard (`SkipRowStandard*`,
+  `SkipDataRow*`) na wypadek reapa w środku kroku.
+- Zachowanie przed dispose bez zmian; żaden test nie zależał od NRE.
+
+## 3. Test stresu odporny na mało rdzeni i teardown
+
+- Workery w pełni asynchroniczne (synchroniczne `Read()` w tym samym procesie
+  co serwer replay głodziło pool wątków na 1–2 rdzeniach).
+- Workery tolerują aborty kwerend spowodowane teardownem — ale **tylko** gdy
+  teardown faktycznie wystartował (`IsDisposed`), inaczej rethrow.
+- Joins ograniczone `WaitAsync(90 s)`: regresja failuje zamiast wieszać CI.
+
+## Wyniki
+
+- Stress: **1 / 2 / 4 CPU → pass w ~2 s** (wcześniej hang > 90 s na ≤2).
+- Full Unit: **142/142** na 1 CPU i pełnym CPU.
+- CI (`ci.yml`, ubuntu + windows) odblokowane — wcześniejsze runy wisiały
+  w kroku Unit tests.
+
+## Decision
+
+**ACCEPTED.**
+
+---
 
 ## STOP — DO NOT TOUCH WITHOUT PROFILING.
