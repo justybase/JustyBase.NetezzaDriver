@@ -3072,8 +3072,6 @@ public sealed class NzConnection : DbConnection
         {
             ref RowValue rowValue = ref _row[fieldLf];
             rowValue.ResetForReuse(); // Drop references retained by the previous row before reusing this slot.
-            //CTableFieldAt can span be used here ? - to reduce alocation
-            ReadOnlySpan<byte> fieldDataP = CTableFieldAt(data, curField);
 
             //var standardImplementation = bitmap[tupdesc.FieldPhysField[fieldLf]] == 1;
             //Debug.Assert(standardImplementation == res);
@@ -3087,6 +3085,9 @@ public sealed class NzConnection : DbConnection
                 fieldLf += 1;
                 continue;
             }
+
+            // Locate the field payload only for non-null columns.
+            ReadOnlySpan<byte> fieldDataP = CTableFieldAt(data, curField);
 
             // Fldlen is byte-length of backend-datatype
             // memsize is byte-length of ODBC-datatype or internal-datatype for (Numeric/Interval)
@@ -3626,6 +3627,10 @@ public sealed class NzConnection : DbConnection
 
     private bool ColumnIsNull(ReadOnlySpan<byte> data, int fieldLf)
     {
+        // When the descriptor says nulls are impossible, skip the bitmap read.
+        if (_tupdesc.NullsAllowed == 0)
+            return false;
+
         var decodedColumnNumber = _tupdesc.FieldPhysFieldArr[fieldLf];
         byte numberToTest = data[2 + decodedColumnNumber / 8];
         var numberOfBitToCheck = decodedColumnNumber % 8;
