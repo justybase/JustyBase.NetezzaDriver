@@ -54,6 +54,40 @@ public sealed class NzReplayTests
     }
 
     [Fact]
+    public async Task Replay_CloseAndReopen_ProtocolReadsFailCleanlyAndConnectionIsReusable()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        await using var connection = OpenConnection(server.Port);
+
+        await connection.CloseAsync();
+        using (var command = connection.CreateCommand(fixture.Query))
+        {
+            Assert.Throws<NetezzaException>(() => connection.ReadNextResponseByte());
+            await Assert.ThrowsAsync<NetezzaException>(async () =>
+            {
+                await connection.ReadNextResponseByteAsync();
+            });
+            Assert.Throws<NetezzaException>(() => connection.DoNextStep(command));
+            await Assert.ThrowsAsync<NetezzaException>(async () =>
+            {
+                await connection.DoNextStepAsync(command);
+            });
+        }
+
+        connection.Open();
+        using var reopenedCommand = connection.CreateCommand(fixture.Query);
+        using var reader = reopenedCommand.ExecuteReader();
+        int rows = 0;
+        while (reader.Read())
+        {
+            rows++;
+        }
+
+        Assert.Equal(fixture.ExpectedRows, rows);
+    }
+
+    [Fact]
     public async Task Replay_DimDate_LazyDecoding_MatchesEagerDecoding()
     {
         var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
@@ -462,12 +496,10 @@ public sealed class NzReplayTests
         // Teardown-aborted operations are correct product behavior (teardown
         // reaps sockets out from under in-flight work) and must be tolerated
         // — but only once teardown actually started. Anything else rethrows
-        // so genuine failures still fail the test. NullReferenceException is
-        // included only post-dispose: a reap landing mid-step of the eager
-        // decode path surfaces it from the released read buffer, while the
-        // drain path itself throws typed errors (see ThrowIfDisposed).
+        // so genuine failures still fail the test. Protocol teardown races
+        // must surface a typed connection error rather than NullReferenceException.
         static bool IsTeardownAbort(NzConnectionPool pool, Exception ex)
-            => pool.IsDisposed && ex is NetezzaException or InterfaceException or IOException or NullReferenceException;
+            => pool.IsDisposed && ex is NetezzaException or InterfaceException or IOException;
 
         async Task Worker(int id)
         {
