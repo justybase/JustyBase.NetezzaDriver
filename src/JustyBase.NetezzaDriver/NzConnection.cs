@@ -998,6 +998,8 @@ public sealed class NzConnection : DbConnection
     private void PreExecution(NzCommand nzCommand, string query)
     {
         ThrowIfProtocolFaulted();
+        ReleaseLazyOversize();
+        _lazyRowActive = false;
         _error = null;
         _backendException = null;
         nzCommand._recordsAffected = -1;
@@ -1049,6 +1051,8 @@ public sealed class NzConnection : DbConnection
     private async Task PreExecutionAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
     {
         ThrowIfProtocolFaulted();
+        ReleaseLazyOversize();
+        _lazyRowActive = false;
         _error = null;
         _backendException = null;
         nzCommand._recordsAffected = -1;
@@ -2798,6 +2802,78 @@ public sealed class NzConnection : DbConnection
 
     public bool UseStringPool { get; set; } = true;
 
+    /// <summary>
+    /// When enabled, <c>RowStandard</c> rows are parsed for structure only and
+    /// individual columns are converted on first access instead of eagerly for
+    /// every row. Off by default; the eager path is unchanged when disabled.
+    /// </summary>
+    public bool UseLazyColumnDecoding { get; set; }
+
+    private ReadOnlyMemory<byte> _lazyRowMemory;
+    private byte[]? _lazyOversizeBuffer;
+    private bool _lazyRowActive;
+
+    private void ReleaseLazyOversize()
+    {
+        var buffer = _lazyOversizeBuffer;
+        if (buffer is not null)
+        {
+            _lazyOversizeBuffer = null;
+            _readBuffer?.ReturnOversize(buffer);
+        }
+    }
+
+    private void ParseLazyRow(NzCommand nzCommand, ReadOnlyMemory<byte> payload, int numFields)
+    {
+        if (_row is null || _row.Length < numFields)
+        {
+            _row = new RowValue[numFields];
+        }
+
+        PrepareVariableFieldOffsets(payload.Span);
+        for (int i = 0; i < numFields; i++)
+        {
+            _row[i].ResetForLazyDecode();
+        }
+
+        _lazyRowMemory = payload;
+        _lazyRowActive = true;
+        nzCommand.AddLazyRow(_row);
+    }
+
+    /// <summary>
+    /// Decodes a single column of the currently retained lazy row on demand.
+    /// Called only from <see cref="NzCommand.GetValue(int)"/>.
+    /// </summary>
+    internal void EnsureFieldDecoded(int ordinal)
+    {
+        if (!_lazyRowActive)
+            return;
+
+        ref RowValue rowValue = ref _row![ordinal];
+        if (rowValue.typeCode != RowValue.NotDecoded)
+            return;
+
+        var data = _lazyRowMemory.Span;
+        if (ColumnIsNull(data, ordinal))
+        {
+            rowValue.typeCode = TypeCodeEx.Empty;
+            return;
+        }
+
+        DecodeField(data, ordinal, ref rowValue);
+    }
+
+    /// <summary>
+    /// Null test for the retained lazy row that avoids materialising the value.
+    /// </summary>
+    internal bool IsFieldNull(int ordinal)
+    {
+        if (!_lazyRowActive || _lazyRowMemory.Length == 0)
+            return false;
+        return ColumnIsNull(_lazyRowMemory.Span, ordinal);
+    }
+
     private string GetStandardString(int curField, ReadOnlySpan<byte> spanData, Encoding encoding)
     {
         var sp = _nzCommand?.GetColumnStringPool(curField);
@@ -2863,6 +2939,23 @@ public sealed class NzConnection : DbConnection
                 numFields,
                 _tupdesc.MaxRecordSize);
 
+        if (UseLazyColumnDecoding)
+        {
+            ReleaseLazyOversize();
+            if (payloadLength <= _readBuffer!.Capacity)
+            {
+                _readBuffer.Ensure(payloadLength);
+                ParseLazyRow(nzCommand, _readBuffer.ReadMemory(payloadLength), numFields);
+            }
+            else
+            {
+                byte[] rented = _readBuffer.RentOversize(payloadLength);
+                ParseLazyRow(nzCommand, rented.AsMemory(0, payloadLength), numFields);
+                _lazyOversizeBuffer = rented;
+            }
+            return;
+        }
+
         if (payloadLength <= _readBuffer!.Capacity)
         {
             // Decode in place: no per-row copy into _tmp_buffer.
@@ -2903,6 +2996,23 @@ public sealed class NzConnection : DbConnection
                 payloadLength,
                 numFields,
                 _tupdesc.MaxRecordSize);
+
+        if (UseLazyColumnDecoding)
+        {
+            ReleaseLazyOversize();
+            if (payloadLength <= _readBuffer!.Capacity)
+            {
+                await _readBuffer.EnsureAsync(payloadLength, cancellationToken).ConfigureAwait(false);
+                ParseLazyRow(nzCommand, _readBuffer.ReadMemory(payloadLength), numFields);
+            }
+            else
+            {
+                byte[] rented = await _readBuffer.RentOversizeAsync(payloadLength, cancellationToken).ConfigureAwait(false);
+                ParseLazyRow(nzCommand, rented.AsMemory(0, payloadLength), numFields);
+                _lazyOversizeBuffer = rented;
+            }
+            return;
+        }
 
         if (payloadLength <= _readBuffer!.Capacity)
         {
@@ -3164,6 +3274,204 @@ public sealed class NzConnection : DbConnection
         }
 
         nzCommand.AddRow(_row);
+    }
+
+    /// <summary>
+    /// Decodes one column from a retained lazy row. The case bodies mirror the
+    /// eager switch in <see cref="ParseDbosTupleData"/>; keep the two in sync.
+    /// </summary>
+    private void DecodeField(ReadOnlySpan<byte> data, int curField, ref RowValue rowValue)
+    {
+        ReadOnlySpan<byte> fieldDataP = CTableFieldAt(data, curField);
+        int fldlen = CTableIFieldSize(curField);
+        int fldtype = CTableIFieldType(curField);
+        bool logDebug = _logger?.IsEnabled(LogLevel.Debug) == true;
+
+        switch (fldtype)
+        {
+            case NzTypeUnknown:
+            case NzTypeVarChar:
+            case NzTypeVarFixedChar:
+            case NzTypeGeometry:
+            case NzTypeVarBinary:
+            case NzTypeJson:
+            case NzTypeJsonb:
+            case NzTypeJsonpath:
+            {
+                int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
+                rowValue.typeCode = TypeCodeEx.String;
+                rowValue.stringValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                break;
+            }
+
+            case NzTypeChar:
+            {
+                string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding);
+                rowValue.typeCode = TypeCodeEx.String;
+                rowValue.stringValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=CHAR, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeNChar:
+            case NzTypeNVarChar:
+            {
+                int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                string value;
+                if (fldtype == NzTypeNVarChar || fldlen == cursize)
+                {
+                    value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.ClientEncoding);
+                }
+                else
+                {
+                    value = GetFixedLenString(curField, fieldDataP, fldlen, cursize);
+                }
+                rowValue.typeCode = TypeCodeEx.String;
+                rowValue.stringValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                break;
+            }
+
+            case NzTypeInt8:
+            {
+                long value = BitConverter.ToInt64(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.Int64;
+                rowValue.int64Value = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt8, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeIntvsAbsTimeFIX:
+            {
+                DateTime value = DateTypes.TimestampRecvInt(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.DateTime;
+                rowValue.dateTimeValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeInt:
+            {
+                int value = BitConverter.ToInt32(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.Int32;
+                rowValue.int32Value = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeInt2:
+            {
+                short value = BitConverter.ToInt16(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.Int16;
+                rowValue.int16Value = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt2, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeInt1:
+            {
+                Int16 value = (Int16)(sbyte)fieldDataP[0];
+                rowValue.typeCode = TypeCodeEx.Int16;
+                rowValue.int16Value = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt1, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeDouble:
+            {
+                double value = BitConverter.ToDouble(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.Double;
+                rowValue.doubleValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeDouble, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeFloat:
+            {
+                float value = BitConverter.ToSingle(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.Single;
+                rowValue.singleValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeFloat, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeDate:
+            {
+                DateTime value = DateTypes.ToDateTimeFrom4Bytes(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.DateTime;
+                rowValue.dateTimeValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=DATE, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeTime:
+            {
+                TimeSpan value = DateTypes.TimeRecvFloatX2(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.TimeSpan;
+                rowValue.timeSpanValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIME, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeInterval:
+            {
+                string value = DateTypes.TimeRecvFloatX1(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.String;
+                rowValue.stringValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=INTERVAL, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeTimeTz:
+            {
+                TimeSpan timeSpanVal = DateTypes.TimeRecvFloatX2(fieldDataP);
+                int timetzZone = BitConverter.ToInt32(fieldDataP.Slice(fldlen - 4));
+                rowValue.typeCode = TypeCodeEx.String;
+                rowValue.stringValue = DateTypes.TimetzOutTimetzadt(timeSpanVal, timetzZone);
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMETZ, value={Value}", curField + 1, rowValue.stringValue);
+                break;
+            }
+
+            case NzTypeTimestamp:
+            {
+                DateTime value = DateTypes.ToDateTimeFrom8Bytes(fieldDataP);
+                rowValue.typeCode = TypeCodeEx.DateTime;
+                rowValue.dateTimeValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMESTAMP, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeNumeric:
+            {
+                int prec = CTableIFieldPrecision(curField);
+                int scale = CTableIFieldScale(curField);
+                int count = CTableIFieldNumericDigit32Count(curField);
+                decimal value;
+                try
+                {
+                    value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
+                }
+                catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentOutOfRangeException or InvalidCastException)
+                {
+                    throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
+                }
+                rowValue.typeCode = TypeCodeEx.Decimal;
+                rowValue.decimalValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, value);
+                break;
+            }
+
+            case NzTypeBool:
+            {
+                bool value = fieldDataP[0] == 0x01;
+                rowValue.typeCode = TypeCodeEx.Boolean;
+                rowValue.boolValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=BOOL, value={Value}", curField + 1, value);
+                break;
+            }
+        }
     }
 
 
@@ -3720,6 +4028,8 @@ public sealed class NzConnection : DbConnection
 
     public override void Close()
     {
+        ReleaseLazyOversize();
+        _lazyRowActive = false;
         _readBuffer?.Dispose();
         _readBuffer = null;
         _stream?.Dispose();
@@ -3740,6 +4050,8 @@ public sealed class NzConnection : DbConnection
 
     public override async Task CloseAsync()
     {
+        ReleaseLazyOversize();
+        _lazyRowActive = false;
         _readBuffer?.Dispose();
         _readBuffer = null;
         if (_stream is not null)

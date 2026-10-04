@@ -418,8 +418,7 @@ public sealed class NzDataReader : DbDataReader
     public override bool IsDBNull(int ordinal)
     {
         ValidateOrdinal(ordinal);
-        ref readonly var rw = ref _nzCommand.GetValue(ordinal);
-        return rw.typeCode == TypeCodeEx.DBNull || rw.typeCode == TypeCodeEx.Empty;
+        return _nzCommand.IsDBNullFast(ordinal);
     }
 
     public override int GetValues(object[] values)

@@ -192,6 +192,21 @@ internal sealed class NzReadBuffer
         return span;
     }
 
+    /// <summary>
+    /// Returns a <see cref="ReadOnlyMemory{T}"/> over the next <paramref name="count"/>
+    /// bytes and advances the read position. Used by lazy row decoding to retain the
+    /// row payload until the next protocol read (the ADO.NET value-lifetime contract).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ReadOnlyMemory<byte> ReadMemory(int count)
+    {
+        Ensure(count);
+        var memory = _buffer.AsMemory(_readPos, count);
+        _readPos += count;
+        _consumed += count;
+        return memory;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Skip(int count)
     {

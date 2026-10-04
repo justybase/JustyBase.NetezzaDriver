@@ -17,6 +17,7 @@ public sealed class NzCommand : DbCommand
     }
 
     private RowValue[] _row = null!;
+    private bool _lazyRow;
     private readonly List<string> _notices = [];
     private readonly ReadOnlyCollection<string> _noticesView;
 
@@ -30,10 +31,38 @@ public sealed class NzCommand : DbCommand
     public void AddRow(RowValue[] row)
     {
         _row = row;
+        _lazyRow = false;
     }
+
+    internal void AddLazyRow(RowValue[] row)
+    {
+        _row = row;
+        _lazyRow = true;
+    }
+
+    internal bool IsLazyRow => _lazyRow;
+
     public ref RowValue GetValue(int ordinal)
     {
+        if (_lazyRow)
+        {
+            _connection.EnsureFieldDecoded(ordinal);
+        }
         return ref _row[ordinal];
+    }
+
+    /// <summary>
+    /// Null test that, under lazy decoding, consults the row null bitmap without
+    /// materialising the column value.
+    /// </summary>
+    internal bool IsDBNullFast(int ordinal)
+    {
+        if (_lazyRow && _row[ordinal].typeCode == RowValue.NotDecoded)
+        {
+            return _connection.IsFieldNull(ordinal);
+        }
+        var typeCode = _row[ordinal].typeCode;
+        return typeCode == TypeCodeEx.DBNull || typeCode == TypeCodeEx.Empty;
     }
 
     public NzCommand(NzConnection connection)
