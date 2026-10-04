@@ -17,6 +17,8 @@ public sealed class NzDataReader : DbDataReader
     private bool _needsToBeNextResultCalled = false;
     private bool _hasRows = false;
     private bool _disposed = false;
+    private readonly bool _singleRow;
+    private bool _singleRowFirstRowReturned;
 
     private DataTable? _schemaTable;
 
@@ -45,6 +47,7 @@ public sealed class NzDataReader : DbDataReader
     {
         _nzCommand = nzCommand ?? throw new ArgumentNullException(nameof(nzCommand));
         _nzConnection = nzCommand.Connection as NzConnection ?? throw new ArgumentNullException(nameof(nzCommand.Connection));
+        _singleRow = (nzCommand.RequestedBehavior & CommandBehavior.SingleRow) != 0;
 
         if (initializeReader)
         {
@@ -84,10 +87,21 @@ public sealed class NzDataReader : DbDataReader
             return false;
         }
 
+        // SingleRow: the caller only wants the first row. The backend still
+        // sends the rest, so drain them via the discard path (no decode)
+        // before reporting no more rows. This keeps protocol sync for reuse.
+        if (_singleRow && _singleRowFirstRowReturned)
+        {
+            DrainRemainingDiscardingRows();
+            return false;
+        }
+
         while (_opened = _nzConnection.DoNextStep(_nzCommand))
         {
             if (_nzConnection.NewRowReceived())
             {
+                if (_singleRow)
+                    _singleRowFirstRowReturned = true;
                 return true;
             }
             if (_nzConnection.NewRowDescriptionReceived())
@@ -98,6 +112,34 @@ public sealed class NzDataReader : DbDataReader
             }
         }
         return false;//final stop!
+    }
+
+    private void DrainRemainingDiscardingRows()
+    {
+        try
+        {
+            while (_opened = _nzConnection.DoNextStepDiscardingRows(_nzCommand))
+            {
+            }
+        }
+        catch (NetezzaException)
+        {
+            _opened = false;
+        }
+    }
+
+    private async ValueTask DrainRemainingDiscardingRowsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (_opened = await _nzConnection.DoNextStepDiscardingRowsAsync(_nzCommand, cancellationToken).ConfigureAwait(false))
+            {
+            }
+        }
+        catch (NetezzaException)
+        {
+            _opened = false;
+        }
     }
 
     public override Task<bool> ReadAsync(CancellationToken cancellationToken)
@@ -119,10 +161,18 @@ public sealed class NzDataReader : DbDataReader
 
     private async ValueTask<bool> ReadAsyncCore(CancellationToken cancellationToken)
     {
+        if (_singleRow && _singleRowFirstRowReturned)
+        {
+            await DrainRemainingDiscardingRowsAsync(cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
         while (_opened = await _nzConnection.DoNextStepAsync(_nzCommand, cancellationToken).ConfigureAwait(false))
         {
             if (_nzConnection.NewRowReceived())
             {
+                if (_singleRow)
+                    _singleRowFirstRowReturned = true;
                 return true;
             }
             if (_nzConnection.NewRowDescriptionReceived())
@@ -140,16 +190,9 @@ public sealed class NzDataReader : DbDataReader
         if (!_disposed && _opened)
         {
             base.Close();
-            try
-            {
-                while (_opened = _nzConnection.DoNextStep(_nzCommand))
-                {
-                }
-            }
-            catch (NetezzaException)
-            {
-                _opened = false;
-            }
+            // Fast drain: skip undecodable row payloads, still process
+            // CommandComplete/ReadyForQuery so the connection stays reusable.
+            DrainRemainingDiscardingRows();
         }
     }
 
@@ -170,16 +213,7 @@ public sealed class NzDataReader : DbDataReader
         if (!_disposed && _opened)
         {
             base.Close();
-            try
-            {
-                while (_opened = await _nzConnection.DoNextStepAsync(_nzCommand, cancellationToken).ConfigureAwait(false))
-                {
-                }
-            }
-            catch (NetezzaException)
-            {
-                _opened = false;
-            }
+            await DrainRemainingDiscardingRowsAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 

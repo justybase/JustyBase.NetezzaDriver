@@ -180,12 +180,17 @@ public sealed class NzConnectionPool : IAsyncDisposable
         return connection;
     }
 
-    private async Task<bool> IsConnectionValidAsync(NzConnection connection, CancellationToken cancellationToken)
+    internal async Task<bool> IsConnectionValidAsync(NzConnection connection, CancellationToken cancellationToken)
     {
         if (connection.State != System.Data.ConnectionState.Open || IsConnectionExpired(connection))
             return false;
 
         Interlocked.Increment(ref _connectionValidationCount);
+        // NzCommand.CommandTimeout currently forwards to the shared
+        // NzConnection.CommandTimeout, so save/restore around the probe.
+        // Otherwise validation would permanently change the application's
+        // timeout on the physical connection.
+        var originalTimeout = connection.CommandTimeout;
         try
         {
             await using var cmd = connection.CreateCommand();
@@ -201,6 +206,10 @@ public sealed class NzConnectionPool : IAsyncDisposable
         catch
         {
             return false;
+        }
+        finally
+        {
+            connection.CommandTimeout = originalTimeout;
         }
     }
 

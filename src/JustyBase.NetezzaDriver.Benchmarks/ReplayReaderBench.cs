@@ -184,4 +184,45 @@ public class ReplayReaderBench
         }
         return rows;
     }
+
+    [Benchmark(Description = "read 1 row + Dispose (fast drain)")]
+    public int Sync_Read1_Dispose()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        _connection.DiscardedRows = 0;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int rows = 0;
+        if (reader.Read())
+        {
+            _ = reader.GetValue(0);
+            rows = 1;
+        }
+        // Dispose drains the remaining rows via the discard path.
+        return rows;
+    }
+
+    [Benchmark(Description = "read 10 rows + Dispose (fast drain)")]
+    public int Sync_Read10_Dispose()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        _connection.DiscardedRows = 0;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int rows = 0;
+        while (rows < 10 && reader.Read())
+        {
+            _ = reader.GetValue(0);
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark(Description = "ExecuteScalar over full result (SingleRow)")]
+    public object? Sync_ExecuteScalar()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        return command.ExecuteScalar();
+    }
 }

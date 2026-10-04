@@ -225,6 +225,9 @@ internal static class NzParameterHelper
     {
         int count = parameters.Count;
         Span<bool> used = count <= 128 ? stackalloc bool[count] : new bool[count];
+        // stackalloc memory is uninitialized; heap array is zeroed but Clear()
+        // keeps both paths explicitly false-initialized.
+        used.Clear();
 
         // For larger collections a linear scan per placeholder is O(n*m).
         // Build an open-addressing name table once; duplicate names fall back

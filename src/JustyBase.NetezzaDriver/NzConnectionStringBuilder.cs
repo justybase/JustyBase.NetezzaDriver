@@ -49,8 +49,9 @@ public sealed class NzConnectionStringBuilder
         sb.Append($"ConnectionIdleTimeout={ConnectionIdleTimeout};");
         if (ConnectionLifetime > 0)
             sb.Append($"ConnectionLifetime={ConnectionLifetime};");
-        if (ConnectionValidationInterval > 0)
-            sb.Append($"ConnectionValidationInterval={ConnectionValidationInterval};");
+        // Always persist: 0 is a valid explicit setting (validate on every
+        // checkout) and must survive builder -> string -> parser round trips.
+        sb.Append($"ConnectionValidationInterval={ConnectionValidationInterval};");
         return sb.ToString();
     }
     public string ConnectionString => ToString();
