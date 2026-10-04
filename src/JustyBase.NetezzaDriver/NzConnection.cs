@@ -1475,6 +1475,7 @@ public sealed class NzConnection : DbConnection
     internal bool DoNextStep(NzCommand nzCommand)
     {
         ThrowIfProtocolFaulted();
+        ThrowIfDisposed();
         if (_shouldReadByte)
         {
             ReadNextResponseByte();
@@ -1495,6 +1496,7 @@ public sealed class NzConnection : DbConnection
     internal async ValueTask<bool> DoNextStepAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
         ThrowIfProtocolFaulted();
+        ThrowIfDisposed();
         if (_shouldReadByte)
         {
             await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
@@ -1522,6 +1524,7 @@ public sealed class NzConnection : DbConnection
     internal bool DoNextStepDiscardingRows(NzCommand nzCommand)
     {
         ThrowIfProtocolFaulted();
+        ThrowIfDisposed();
         if (_shouldReadByte)
         {
             ReadNextResponseByte();
@@ -1542,6 +1545,7 @@ public sealed class NzConnection : DbConnection
     internal async ValueTask<bool> DoNextStepDiscardingRowsAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {
         ThrowIfProtocolFaulted();
+        ThrowIfDisposed();
         if (_shouldReadByte)
         {
             await ReadNextResponseByteAsync(cancellationToken).ConfigureAwait(false);
@@ -1821,6 +1825,20 @@ public sealed class NzConnection : DbConnection
         {
             throw new NetezzaException(
                 "The connection encountered an invalid backend protocol length and cannot be reused; reconnect is required.");
+        }
+    }
+
+    /// <summary>
+    /// A read raced with teardown (pool reap, explicit dispose) must surface
+    /// a typed backend error, never a <see cref="NullReferenceException"/>
+    /// from the already-released read buffer. Drain loops already translate
+    /// <see cref="NetezzaException"/> into clean termination.
+    /// </summary>
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+        {
+            throw new NetezzaException("Connection is closed.");
         }
     }
 
@@ -3135,7 +3153,10 @@ public sealed class NzConnection : DbConnection
         // A previous large DataRow payload must not be pinned while draining.
         ReleaseLargeReadBuffer();
 
-        _readBuffer!.Discard(payloadLength);
+        var discardBuffer = _readBuffer;
+        if (discardBuffer is null)
+            throw new NetezzaException("Connection is closed.");
+        discardBuffer.Discard(payloadLength);
         DiscardedRows++;
     }
 
@@ -3158,7 +3179,10 @@ public sealed class NzConnection : DbConnection
         }
         ReleaseLargeReadBuffer();
 
-        await _readBuffer!.DiscardAsync(payloadLength, cancellationToken).ConfigureAwait(false);
+        var discardBuffer = _readBuffer;
+        if (discardBuffer is null)
+            throw new NetezzaException("Connection is closed.");
+        await discardBuffer.DiscardAsync(payloadLength, cancellationToken).ConfigureAwait(false);
         DiscardedRows++;
     }
 
@@ -3166,7 +3190,10 @@ public sealed class NzConnection : DbConnection
     {
         int length = ReadProtocolLength("dataRowPayloadLength");
         ReleaseLargeReadBuffer();
-        _readBuffer!.Discard(length);
+        var discardBuffer = _readBuffer;
+        if (discardBuffer is null)
+            throw new NetezzaException("Connection is closed.");
+        discardBuffer.Discard(length);
         DiscardedRows++;
     }
 
@@ -3176,7 +3203,10 @@ public sealed class NzConnection : DbConnection
             "dataRowPayloadLength",
             cancellationToken: cancellationToken).ConfigureAwait(false);
         ReleaseLargeReadBuffer();
-        await _readBuffer!.DiscardAsync(length, cancellationToken).ConfigureAwait(false);
+        var discardBuffer = _readBuffer;
+        if (discardBuffer is null)
+            throw new NetezzaException("Connection is closed.");
+        await discardBuffer.DiscardAsync(length, cancellationToken).ConfigureAwait(false);
         DiscardedRows++;
     }
 
