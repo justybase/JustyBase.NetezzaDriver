@@ -62,7 +62,7 @@ public sealed class NzConnection : DbConnection
     private readonly string _host;
     private readonly int _port;
 
-    public DateTime CreatedAt { get; private set; } = DateTime.UtcNow;
+    public DateTime CreatedAt { get; internal set; } = DateTime.UtcNow;
 
     public const int NzTypeRecAddr = 1;
     public const int NzTypeDouble = 2;
@@ -162,7 +162,7 @@ public sealed class NzConnection : DbConnection
     /// <param name="connectionString">Connection string in format "User=value;Password=value" or "User=value;Password={value;with;semicolons}"</param>
     /// <returns>A tuple containing connection parameters</returns>
     /// <exception cref="NetezzaException">Thrown when mandatory parameters are missing or format is invalid</exception>
-    private static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime) ParseConnectionString(string connectionString)
+    private static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime, int ConnectionValidationInterval) ParseConnectionString(string connectionString)
     {
         var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int position = 0;
@@ -264,8 +264,12 @@ public sealed class NzConnection : DbConnection
         int connectionLifetime = 0;
         if (parameters.TryGetValue("ConnectionLifetime", out var lifetimeStr))
             int.TryParse(lifetimeStr, out connectionLifetime);
+        int connectionValidationInterval = NzConnectionStringBuilder.DefaultConnectionValidationInterval;
+        if (parameters.TryGetValue("ConnectionValidationInterval", out var validationStr)
+            && int.TryParse(validationStr, out var parsedValidation))
+            connectionValidationInterval = parsedValidation;
 
-        return (user, password, host, database, port, timeout, pooling, minPoolSize, maxPoolSize, connectionIdleTimeout, connectionLifetime);
+        return (user, password, host, database, port, timeout, pooling, minPoolSize, maxPoolSize, connectionIdleTimeout, connectionLifetime, connectionValidationInterval);
     }
 
 

@@ -69,7 +69,7 @@ public class PoolTests : IAsyncLifetime
         var pooled2 = await _pool.RentAsync();
         int pid2 = pooled2.Connection.Pid;
         Assert.Equal(pid1, pid2);
-        Assert.Equal(1, _pool.ConnectionValidationCount);
+        Assert.Equal(0, _pool.ConnectionValidationCount);
         await pooled2.DisposeAsync();
     }
 
@@ -131,11 +131,11 @@ public class PoolUnitTests
         Assert.Equal(10, builder.MaxPoolSize);
         Assert.Equal(30, builder.ConnectionIdleTimeout);
         Assert.Equal(0, builder.ConnectionLifetime);
-        Assert.Equal(0, builder.ConnectionValidationInterval);
+        Assert.Equal(NzConnectionStringBuilder.DefaultConnectionValidationInterval, builder.ConnectionValidationInterval);
     }
 
     [Fact]
-    public async Task PoolValidationIntervalUsesIdleDurationAndDefaultsToEveryCheckout()
+    public async Task PoolValidationIntervalUsesIdleDuration()
     {
         var now = DateTime.UtcNow;
         var intervalPool = new NzConnectionPool(new NzConnectionStringBuilder
@@ -149,10 +149,59 @@ public class PoolUnitTests
         Assert.False(intervalPool.ShouldValidateIdleConnection(now.AddSeconds(-59), now));
         Assert.True(intervalPool.ShouldValidateIdleConnection(now.AddSeconds(-60), now));
         await intervalPool.DisposeAsync();
+    }
 
+    [Fact]
+    public async Task DefaultPoolValidationSkipsRecentlyReturnedConnection()
+    {
+        var now = DateTime.UtcNow;
         var defaultPool = new NzConnectionPool("host", "db", "user", "pass");
-        Assert.True(defaultPool.ShouldValidateIdleConnection(now, now));
+
+        // A healthy connection returned moments ago must be rented again without a SELECT 1 probe.
+        Assert.False(defaultPool.ShouldValidateIdleConnection(now, now));
+        Assert.False(defaultPool.ShouldValidateIdleConnection(now.AddSeconds(-1), now));
+        // Once it has been idle past the interval it must be validated.
+        Assert.True(defaultPool.ShouldValidateIdleConnection(
+            now.AddSeconds(-(NzConnectionStringBuilder.DefaultConnectionValidationInterval + 1)), now));
+
         await defaultPool.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ZeroValidationIntervalValidatesOnEveryCheckout()
+    {
+        var now = DateTime.UtcNow;
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "host",
+            Database = "db",
+            UserName = "user",
+            Password = "pass",
+            ConnectionValidationInterval = 0
+        });
+        Assert.True(pool.ShouldValidateIdleConnection(now, now));
+        Assert.True(pool.ShouldValidateIdleConnection(now.AddSeconds(-1), now));
+        await pool.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ExpiredConnectionRequiresValidationEvenWhenRecentlyReturned()
+    {
+        var now = DateTime.UtcNow;
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "host",
+            Database = "db",
+            UserName = "user",
+            Password = "pass",
+            ConnectionValidationInterval = 60,
+            ConnectionLifetime = 10
+        });
+        using var connection = new NzConnection("user", "pass", "host", "db");
+        connection.CreatedAt = now.AddSeconds(-30);
+
+        Assert.True(pool.ShouldValidateIdleConnection(connection, now, now));
+        await pool.DisposeAsync();
     }
 
     [Fact]
@@ -187,6 +236,17 @@ public class PoolUnitTests
         };
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new NzConnectionPool(builder));
+    }
+
+    [Fact]
+    public async Task RentAsyncWithCancelledTokenDoesNotCreateConnection()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass");
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pool.RentAsync(cts.Token));
+        await pool.DisposeAsync();
     }
 
     [Fact]
