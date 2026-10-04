@@ -97,6 +97,29 @@ public sealed class NzReplayTests
         return rows;
     }
 
+    [Fact]
+    public async Task LargeCommandText_DoesNotGrowRetainedTmpBuffer()
+    {
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        using var connection = OpenConnection(server.Port);
+
+        int initialCapacity = connection.TmpBufferCapacity;
+        string largeQuery = "SELECT 1 /* " + new string('x', 256 * 1024) + " */";
+
+        using (var command = connection.CreateCommand(largeQuery))
+        using (var reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+            }
+        }
+
+        // The 256 KB command must not be pinned as the retained scratch buffer.
+        Assert.True(connection.TmpBufferCapacity <= NzConnection.TmpBufferRetainCap);
+        Assert.True(initialCapacity <= NzConnection.TmpBufferRetainCap);
+    }
+
     private static NzReplayServer StartServer(NzReplayFixture fixture) => NzReplayServer.Start(fixture);
 
     private static NzConnection OpenConnection(int port)
