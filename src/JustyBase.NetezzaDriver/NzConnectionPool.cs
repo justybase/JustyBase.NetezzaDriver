@@ -35,6 +35,11 @@ public sealed class NzConnectionPool : IAsyncDisposable
     private readonly object _disposeLock = new();
     private Task? _disposeTask;
     internal int DisposeCoreRunCount;
+    // Tracks ReturnAsync bodies in flight so teardown can wait for started
+    // returns instead of finishing while a return still owns a connection.
+    private int _inFlightReturns;
+    private readonly TaskCompletionSource _returnsDrained =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _maintenanceTask;
 
     public NzConnectionPool(string host, string database, string user, string password,
@@ -88,7 +93,24 @@ public sealed class NzConnectionPool : IAsyncDisposable
     internal void TrackActiveForTests(NzConnection connection)
     {
         if (TryReserveConnectionSlot())
-            _active.TryAdd(connection, 0);
+            TryRegisterActive(connection);
+    }
+
+    /// <summary>
+    /// Registers a physical connection as active under the dispose lock.
+    /// Returns false once the pool is disposed, so a rent whose Open finished
+    /// concurrently with teardown can never add a fresh entry after
+    /// <see cref="DisposeCoreAsync"/> already reaped <c>_active</c>. Callers
+    /// must dispose + release the slot when this returns false.
+    /// </summary>
+    private bool TryRegisterActive(NzConnection connection)
+    {
+        lock (_disposeLock)
+        {
+            if (_disposed)
+                return false;
+            return _active.TryAdd(connection, 0);
+        }
     }
 
     internal bool ShouldValidateIdleConnection(DateTime returnedAtUtc, DateTime nowUtc)
@@ -103,12 +125,22 @@ public sealed class NzConnectionPool : IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Linked with the pool lifetime: a proven .NET gotcha is that
-        // SemaphoreSlim.Dispose() never completes a parked WaitAsync waiter,
-        // so a rent parked on the semaphore during teardown would hang
-        // forever. The linked token wakes it with OCE instead.
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCts.Token);
-        var rentToken = linkedCts.Token;
+        // The wait must also observe pool teardown (a proven .NET gotcha:
+        // SemaphoreSlim.Dispose() never completes a parked WaitAsync waiter).
+        // A linked CTS is only needed when the caller supplies its own token;
+        // the common CancellationToken.None case reuses the dispose token
+        // directly and allocates nothing.
+        CancellationTokenSource? linkedCts = null;
+        CancellationToken rentToken;
+        if (!cancellationToken.CanBeCanceled)
+        {
+            rentToken = _disposeCts.Token;
+        }
+        else
+        {
+            linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCts.Token);
+            rentToken = linkedCts.Token;
+        }
 
         bool permitAcquired = false;
         try
@@ -141,7 +173,15 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
                     if (isValid)
                     {
-                        _active.TryAdd(candidate, 0);
+                        // Registration is serialized with teardown: a rent that
+                        // loses the race must not add an entry after DisposeAsync
+                        // has finished reaping _active.
+                        if (!TryRegisterActive(candidate))
+                        {
+                            await DisposeConnectionAsync(candidate).ConfigureAwait(false);
+                            Interlocked.Decrement(ref _totalConnections);
+                            throw new ObjectDisposedException(GetType().FullName);
+                        }
                         return new PooledNzConnection(candidate, this);
                     }
                     await DisposeConnectionAsync(candidate).ConfigureAwait(false);
@@ -172,7 +212,17 @@ public sealed class NzConnectionPool : IAsyncDisposable
                     ReleaseReservation();
                     throw;
                 }
-                _active.TryAdd(connection, 0);
+
+                if (BeforeRegisterActiveForTests is not null)
+                    await BeforeRegisterActiveForTests(connection).ConfigureAwait(false);
+
+                // Open succeeded but the pool may have been disposed meanwhile.
+                if (!TryRegisterActive(connection))
+                {
+                    await DisposeConnectionAsync(connection).ConfigureAwait(false);
+                    ReleaseReservation();
+                    throw new ObjectDisposedException(GetType().FullName);
+                }
                 return new PooledNzConnection(connection, this);
             }
         }
@@ -183,6 +233,10 @@ public sealed class NzConnectionPool : IAsyncDisposable
             if (permitAcquired)
                 ReleaseSemaphoreSafe();
             throw;
+        }
+        finally
+        {
+            linkedCts?.Dispose();
         }
     }
 
@@ -221,7 +275,29 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
     internal async Task ReturnAsync(NzConnection connection)
     {
+        Interlocked.Increment(ref _inFlightReturns);
+        try
+        {
+            await ReturnAsyncCore(connection).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (Interlocked.Decrement(ref _inFlightReturns) == 0)
+                _returnsDrained.TrySetResult();
+        }
+    }
+
+    /// <summary>
+    /// Test hook invoked once a return has removed its active entry but
+    /// before cleanup. Null in production.
+    /// </summary>
+    internal Func<NzConnection, Task>? BeforeReturnCleanupForTests;
+
+    private async Task ReturnAsyncCore(NzConnection connection)
+    {
         bool removed = _active.TryRemove(connection, out _);
+        if (BeforeReturnCleanupForTests is not null)
+            await BeforeReturnCleanupForTests(connection).ConfigureAwait(false);
         if (_disposed)
         {
             // Pool is dead: close the connection, balance the count only for
@@ -247,7 +323,9 @@ public sealed class NzConnectionPool : IAsyncDisposable
             if (connection.InTransaction)
             {
                 // Async path: must not block the pool with sync network I/O.
-                await connection.RollbackAsync().ConfigureAwait(false);
+                // Cancelled by teardown so a long rollback cannot stall
+                // DisposeAsync waiting for in-flight returns.
+                await connection.RollbackAsync(_disposeCts.Token).ConfigureAwait(false);
             }
         }
         catch
@@ -478,6 +556,12 @@ public sealed class NzConnectionPool : IAsyncDisposable
     internal Func<NzConnection, Task>? BeforeParkIdleForTests;
 
     /// <summary>
+    /// Test hook invoked after a rent's Open succeeded and before active
+    /// registration. Null in production.
+    /// </summary>
+    internal Func<NzConnection, Task>? BeforeRegisterActiveForTests;
+
+    /// <summary>
     /// Reserves a slot, opens one physical connection and parks it in the
     /// idle queue. Ownership rule: once the reservation succeeds there are
     /// exactly two outcomes — parked (the reservation becomes the live
@@ -603,6 +687,8 @@ public sealed class NzConnectionPool : IAsyncDisposable
     {
         DisposeCoreRunCount++;
 
+        // Order: mark disposed (caller did), cancel pending work, wait for
+        // already-started returns, then clear/reap/dispose primitives.
         _disposeCts.Cancel();
         try
         {
@@ -613,6 +699,12 @@ public sealed class NzConnectionPool : IAsyncDisposable
             // A maintenance tick that lost the race with teardown; the queue
             // below is drained deterministically anyway.
         }
+
+        // A ReturnAsync may have removed its entry from _active and still be
+        // rolling back / cleaning up. Wait for those to finish so no return
+        // outlives teardown holding a connection and a count slot.
+        if (Volatile.Read(ref _inFlightReturns) > 0)
+            await _returnsDrained.Task.ConfigureAwait(false);
 
         await ClearAsync().ConfigureAwait(false);
 
