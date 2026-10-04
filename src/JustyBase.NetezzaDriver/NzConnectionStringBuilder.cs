@@ -19,8 +19,14 @@ public sealed class NzConnectionStringBuilder
     public int MaxPoolSize { get; set; } = 10;
     public int ConnectionIdleTimeout { get; set; } = 30;
     public int ConnectionLifetime { get; set; } = 0;
-    /// <summary>Seconds a connection may remain idle before the pool probes it; zero validates on every checkout.</summary>
-    public int ConnectionValidationInterval { get; set; } = 0;
+    /// <summary>Default seconds a pooled connection may remain idle before it is probed with SELECT 1 on checkout.</summary>
+    public const int DefaultConnectionValidationInterval = 30;
+
+    /// <summary>
+    /// Seconds a connection may remain idle before the pool probes it with SELECT 1 on checkout.
+    /// Defaults to <see cref="DefaultConnectionValidationInterval"/>; set to zero to validate on every checkout.
+    /// </summary>
+    public int ConnectionValidationInterval { get; set; } = DefaultConnectionValidationInterval;
 
     public override string ToString()
         => BuildConnectionString(redactPassword: false);

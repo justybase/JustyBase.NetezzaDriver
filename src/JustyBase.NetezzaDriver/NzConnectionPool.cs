@@ -35,7 +35,8 @@ public sealed class NzConnectionPool : IAsyncDisposable
         int port = 5480, int minPoolSize = 0, int maxPoolSize = 10,
         int connectionIdleTimeoutSeconds = 30, int connectionLifetimeSeconds = 0)
         : this(host, database, user, password, port, minPoolSize, maxPoolSize,
-              connectionIdleTimeoutSeconds, connectionLifetimeSeconds, 0)
+              connectionIdleTimeoutSeconds, connectionLifetimeSeconds,
+              NzConnectionStringBuilder.DefaultConnectionValidationInterval)
     {
     }
 
