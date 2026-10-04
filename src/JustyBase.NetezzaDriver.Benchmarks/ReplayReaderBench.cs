@@ -61,6 +61,26 @@ public class ReplayReaderBench
         _server.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
+    /// <summary>
+    /// Honest baseline for the early-dispose drain: decodes every remaining
+    /// row exactly like the legacy <c>Close()</c> loop did, but never calls
+    /// <c>GetValue()</c>, so no boxing/access cost pollutes the comparison
+    /// against the discard path.
+    /// </summary>
+    [Benchmark(Description = "full decode, no GetValue (legacy drain baseline)")]
+    public int Sync_FullDecode_NoGetValue()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int rows = 0;
+        while (reader.Read())
+        {
+            rows++;
+        }
+        return rows;
+    }
+
     [Benchmark(Baseline = true)]
     public int Sync_GetValue()
     {

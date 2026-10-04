@@ -401,6 +401,167 @@ public class PoolUnitTests
         connection.ReleaseTransientBuffers();
         Assert.False(connection.HasTransientBuffersForTests);
     }
+
+    [Fact]
+    public async Task ReturnAfterPoolDispose_DoesNotThrow_DisposesConnection()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass");
+        var connection = new NzConnection("user", "pass", "host", "db");
+        pool.TrackActiveForTests(connection);
+        Assert.Equal(1, pool.TotalConnections);
+        await pool.DisposeAsync();
+
+        // Rent -> Dispose(pool) -> Dispose(lease): must not throw
+        // ObjectDisposedException from the semaphore, must close the
+        // connection, and must balance the count exactly once.
+        var ex = await Record.ExceptionAsync(() => pool.ReturnAsync(connection));
+        Assert.Null(ex);
+        Assert.Equal(0, pool.TotalConnections);
+
+        // Double return is safe: no second decrement, no semaphore touch.
+        var ex2 = await Record.ExceptionAsync(() => pool.ReturnAsync(connection));
+        Assert.Null(ex2);
+        Assert.Equal(0, pool.TotalConnections);
+        connection.Dispose();
+    }
+
+    [Fact]
+    public void ConnectionSlotReservation_CapsAtMaxPoolSize()
+    {
+        var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, 3, 30, 0);
+        try
+        {
+            Assert.True(pool.TryReserveConnectionSlot());
+            Assert.True(pool.TryReserveConnectionSlot());
+            Assert.True(pool.TryReserveConnectionSlot());
+            Assert.False(pool.TryReserveConnectionSlot());
+            Assert.Equal(3, pool.TotalConnections);
+            pool.ReleaseReservation();
+            Assert.True(pool.TryReserveConnectionSlot());
+            pool.ReleaseReservation();
+            pool.ReleaseReservation();
+            pool.ReleaseReservation();
+            Assert.Equal(0, pool.TotalConnections);
+        }
+        finally
+        {
+            pool.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+    }
+
+    [Fact]
+    public async Task ConnectionSlotReservation_NeverExceedsMaxPoolSize_UnderConcurrency()
+    {
+        const int max = 8;
+        var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, max, 30, 0);
+        try
+        {
+            int observedMax = 0;
+            object maxLock = new();
+            var tasks = new List<Task>();
+            for (int t = 0; t < 32; t++)
+            {
+                tasks.Add(Task.Run(() =>
+                {
+                    for (int i = 0; i < 2000; i++)
+                    {
+                        if (pool.TryReserveConnectionSlot())
+                        {
+                            int current = pool.TotalConnections;
+                            lock (maxLock)
+                            {
+                                if (current > observedMax)
+                                    observedMax = current;
+                            }
+                            pool.ReleaseReservation();
+                        }
+                    }
+                }));
+            }
+            await Task.WhenAll(tasks);
+            Assert.True(observedMax <= max);
+            Assert.True(observedMax > 0);
+            Assert.Equal(0, pool.TotalConnections);
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task FailedOpen_ReleasesReservation_TotalReturnsToZero()
+    {
+        // Closed port on loopback: connect fails fast, no server needed.
+        var pool = new NzConnectionPool("127.0.0.1", "db", "user", "pass", 1, 0, 4, 30, 0);
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var tasks = new List<Task>();
+            for (int i = 0; i < 8; i++)
+            {
+                tasks.Add(Task.Run(async () =>
+                {
+                    try { await pool.RentAsync(cts.Token); }
+                    catch { /* expected: connection refused */ }
+                }));
+            }
+            await Task.WhenAll(tasks);
+            Assert.Equal(0, pool.TotalConnections);
+        }
+        finally
+        {
+            await pool.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public void ReleaseResultStateForPooling_DropsLargeStrings_KeepsReusableBuffers()
+    {
+        using var connection = new NzConnection("user", "pass", "host", "db");
+        using var cmd = new NzCommand(connection);
+
+        string big1 = new string('x', 1_000_000);
+        string big2 = new string('y', 1_000_000);
+        var cmdRow = new RowValue[2];
+        cmdRow[0].typeCode = TypeCodeEx.String;
+        cmdRow[0].stringValue = big1;
+        cmdRow[1].typeCode = TypeCodeEx.Int32;
+        cmdRow[1].int32Value = 42;
+        cmd.AddRow(cmdRow);
+        var connRow = new RowValue[2];
+        connRow[0].typeCode = TypeCodeEx.String;
+        connRow[0].stringValue = big2;
+        connection.SetConnectionRowForTests(connRow);
+        cmd.NewPreparedStatement = new PreparedStatement { Sql = "SELECT 1" };
+        connection.SimulateTransientBuffersForTests(4096);
+
+        var weak1 = new WeakReference(big1);
+        var weak2 = new WeakReference(big2);
+
+        // Same calls the pool makes when a connection goes idle.
+        connection.ReleaseTransientBuffers();
+        connection.ReleaseResultStateForPooling();
+
+        big1 = null!;
+        big2 = null!;
+        cmdRow = null!;
+        connRow = null!;
+        for (int i = 0; i < 3; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+        GC.Collect();
+
+        Assert.False(weak1.IsAlive);
+        Assert.False(weak2.IsAlive);
+        Assert.Null(cmd.NewPreparedStatement);
+        Assert.False(connection.HasTransientBuffersForTests);
+        // Reusable buffers kept: row access still works, now DBNull.
+        Assert.True(cmd.IsDBNullFast(0));
+        Assert.Equal(DBNull.Value, cmd.GetValue(0).GetValue());
+    }
 }
 
 [Trait("Category", "Integration")]

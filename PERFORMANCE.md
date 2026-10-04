@@ -471,3 +471,145 @@ regression signal). No unsafe/SIMD/custom allocators added.
 5. Per-command timeout architecture (P1 follow-up): `NzCommand` timeout is
    still shared via `NzConnection`; making it per-command is an API/behavior
    change requiring compat review.
+
+---
+
+# Pool lifecycle + result-state pass (2026-10-04, cz. 2)
+
+Zakres: tylko pozostałości z listy. Bez zmian w `NzReadBuffer`, `Numeric`,
+`GetFieldValue<T>`, parameter rendering, lazy architekturze,
+`SequentialAccess`, `ValueStringBuilder`. Unit: **135 passed, 0 failed**
+(`Category=Unit`; było 130; +5 nowych testów).
+
+## 1. Pool Dispose / Return race (poprawność)
+
+### Problem
+
+`RentAsync() → pool.DisposeAsync() → PooledNzConnection.DisposeAsync()`
+kończył się `ObjectDisposedException`: `ReturnAsync()` wołał
+`_semaphore.Release()` na zdisposowanym `SemaphoreSlim`. Dodatkowo
+bezwarunkowy `Interlocked.Decrement` po `TryRemove` psuł licznik przy
+podwójnym zwrocie.
+
+### Before
+
+Zwrot po dispose poola rzucał; licznik mógł zejść poniżej zera.
+
+### After
+
+- `ReturnAsync`: wpisowy fast-path `_disposed` (domknięcie connection,
+  decrement tylko przy faktycznym `TryRemove`, zero dotykania semafora;
+  idempotentny podwójny zwrot), sekcja enqueue+release pod `_idleLock`
+  z re-checkiem `_disposed` w środku (serializacja z teardownem),
+  `ReleaseSemaphoreSafe`/`ReleaseIdleLockSafe` połykające ODE.
+- `DisposeAsync`: idempotentny przez `_disposeLock`; zbieranie `_active`
+  z `TryRemove` + decrement (kto usunął wpis, ten jest właścicielem
+  제 licznika — brak double-decrement z concurrent `ReturnAsync`).
+- `RentAsync`: flaga `permitAcquired` + safe release; re-check `_disposed`
+  po `WaitAsync`.
+
+### Change
+
+Poprawność; jeden lock na zwrot (poza ścieżką wierszy — pomijalny).
+
+### Decision
+
+**ACCEPTED.** Test: `ReturnAfterPoolDispose_DoesNotThrow_DisposesConnection`
+(zwrot + podwójny zwrot po dispose: brak wyjątku, licznik wraca do 0).
+
+## 2. MaxPoolSize race podczas maintenance (poprawność)
+
+### Problem
+
+`CleanupIdleAsync()` zdejmował wszystkie idle z `ConcurrentQueue` do
+tymczasowej listy. Równoległy `RentAsync()` widział pustą kolejkę i tworzył
+nowe physical connections mimo `_totalConnections == MaxPoolSize`.
+
+### Before
+
+Chwilowe przekroczenia limitu puli przy zbiegnięciu maintenance + rent.
+
+### After
+
+Atomowa rezerwacja slotu (`Interlocked.CompareExchange` w
+`TryReserveConnectionSlot`; CAS udaje się tylko gdy wartość < max, więc
+`_totalConnections` nigdy nie przekracza `MaxPoolSize`). Tworzą tylko
+posiadacze rezerwacji (`RentAsync`, refill `minPoolSize` w maintenance);
+wyjątek z `Open` oddaje rezerwację. Brak slotu + pusta kolejka = krótki
+`Task.Delay(10)` + retry (maintenance odkłada wpisy bezzwłocznie; brak
+deadlocka — maintenance nie potrzebuje permitów; analiza w kodzie).
+
+### Change
+
+Poprawność; pętla retry tylko w transjentnym oknie maintenance.
+
+### Decision
+
+**ACCEPTED.** Testy: deterministyczny cap (`CapsAtMaxPoolSize`),
+konkurencyjny stress 32×2000 rezerwacji (nigdy > max, finał 0) oraz
+`FailedOpen_ReleasesReservation` (8 równoległych rentów na zamknięty port —
+licznik wraca do 0).
+
+## 3. ReleaseResultStateForPooling (retained memory)
+
+### Problem
+
+Zwracane do poola connection trzymało ostatni result set: `RowValue[]`
+(duże `string`/`object`), lazy row state, `NewPreparedStatement`
+(metadata + string pools).
+
+### Before
+
+Idle connection pinowało pamięć ostatniego wyniku.
+
+### After
+
+`ReleaseResultStateForPooling()` (`NzConnection` + `NzCommand`): `Array.Clear`
+na obu `RowValue[]` (instancje zachowane do reuse), wyzerowanie lazy state,
+`NewPreparedStatement = null`. Wołane w `ReturnAsync` obok
+`ReleaseTransientBuffers()`. Celowo bez zmian architektury lazy.
+
+### Change
+
+Retained-memory; koszt raz na zwrot (Clear tablicy, nie na wiersz).
+
+### Decision
+
+**ACCEPTED.** Test z 2× 1 MB stringów + `WeakReference`: po zwrocie oba
+martwe (GC), statement null, bufory reusable zachowane
+(`IsDBNullFast`/`GetValue` → `DBNull`, brak NRE).
+
+## 4. Benchmark fast drain — uczciwy baseline
+
+### Problem
+
+Porównanie fast drain vs pełny odczyt z `GetValue()` zawierało koszt
+boxingu — niesprawiedliwe wobec starego `Close()`, który dekodował, ale
+nigdy nie wołał `GetValue()`.
+
+### Before (pełny odczyt z GetValue)
+
+- dimdate: ~7 ms / ~1130 KB. fact200k: ~37 ms / ~20320 KB.
+
+### After — nowy baseline `Sync_FullDecode_NoGetValue` (dekodowanie jak legacy drain, bez GetValue) vs discard
+
+- dimdate: legacy drain ~6 ms / ~17 KB → discard ~0 ms / ~15 KB
+  (koszt samego dekodowania wyeliminowany w całości).
+- fact200k: legacy drain ~32 ms / ~8 KB → discard ~10 ms / ~8 KB
+  (**−69% CPU**; pozostałe ~10 ms to czysty transfer socketu do RFQ;
+  alokacje równe — zysk to czyste CPU).
+
+### Decision
+
+**ACCEPTED (fast drain zostaje; liczby powyżej to rzetelniejszy pomiar).**
+
+---
+
+## DO NOT TOUCH WITHOUT PROFILING
+
+Po powyższych poprawkach driver uznaje się za architektonicznie domknięty:
+koszty sieciowe > dekodowanie > alokacje per-wiersz, hot pathy na poziomie
+Npgsql. Dalsze zmiany wyłącznie z pomiarem (replay fixture + MemoryDiagnoser).
+Zakazane bez profilowania: `NzReadBuffer`, konwersje numeryczne, gettery
+prymitywne, `GetFieldValue<T>`, parameter rendering, lazy decoding,
+`SequentialAccess`, `ValueStringBuilder`, ownership ArrayPool.

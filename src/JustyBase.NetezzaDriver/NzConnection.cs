@@ -3663,6 +3663,29 @@ public sealed class NzConnection : DbConnection
     internal bool HasTransientBuffersForTests =>
         _largeReadBuffer is not null || _lazyOversizeBuffer is not null || _lazyRowActive;
 
+    /// <summary>
+    /// Drops references owned by the last result set so an idle pooled
+    /// connection does not pin result memory (large strings/objects in
+    /// <c>RowValue</c>, lazy row payload, statement metadata and per-column
+    /// string pools). The reusable <c>RowValue[]</c> buffers themselves are
+    /// kept for the next execution; only their element references are
+    /// cleared. Safe to call when no read is in flight.
+    /// </summary>
+    internal void ReleaseResultStateForPooling()
+    {
+        var row = _row;
+        if (row is not null)
+            Array.Clear(row);
+
+        ReleaseLazyOversize();
+        _lazyRowMemory = default;
+        _lazyRowActive = false;
+
+        _nzCommand?.ReleaseResultStateForPooling();
+    }
+
+    internal void SetConnectionRowForTests(RowValue[] row) => _row = row;
+
     internal void SimulateTransientBuffersForTests(int oversizeBytes)
     {
         if (oversizeBytes > 0)
