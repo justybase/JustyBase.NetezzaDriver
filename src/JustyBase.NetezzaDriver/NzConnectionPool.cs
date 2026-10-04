@@ -164,6 +164,9 @@ public sealed class NzConnectionPool : IAsyncDisposable
         }
 
         _active.TryRemove(pid, out _);
+        // Don't let an unusually large last command/message pin memory on an
+        // idle pooled connection.
+        connection.ReleaseScratchBuffers();
         // Lock-free fast path: ConcurrentQueue.Enqueue is thread-safe.
         _idle.Enqueue(new IdleConnection(connection, DateTime.UtcNow));
         _semaphore.Release();

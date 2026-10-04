@@ -1011,40 +1011,44 @@ public sealed class NzConnection : DbConnection
             _readBuffer!.Skip(4);
             EnsureProtocolSynced(query);
         }
-        if (query is not null)
+        byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
+        try
         {
-            RegenerateBuffer(10 + 4 * query.Length);
-        }
-        _tmp_buffer[0] = (byte)'P';
-        if (_commandNumber != -1)
-        {
-            _commandNumber += 1;
-            Core.IPack(_commandNumber, _tmp_buffer.AsSpan(1));
-        }
-        else
-        {
-            _tmp_buffer[1] = 0xFF;//NEW
-            _tmp_buffer[2] = 0xFF;//NEW
-            _tmp_buffer[3] = 0xFF;//NEW
-            _tmp_buffer[4] = 0xFF;//NEW
-        }
+            writeBuffer[0] = (byte)'P';
+            if (_commandNumber != -1)
+            {
+                _commandNumber += 1;
+                Core.IPack(_commandNumber, writeBuffer.AsSpan(1));
+            }
+            else
+            {
+                writeBuffer[1] = 0xFF;//NEW
+                writeBuffer[2] = 0xFF;//NEW
+                writeBuffer[3] = 0xFF;//NEW
+                writeBuffer[4] = 0xFF;//NEW
+            }
 
-        if (_commandNumber > 100000)
-        {
-            _commandNumber = 1;
-        }
+            if (_commandNumber > 100000)
+            {
+                _commandNumber = 1;
+            }
 
-        int written = 5;
-        if (query != null)
-        {
-            written += Encoding.UTF8.GetBytes(query, _tmp_buffer.AsSpan(written));//NEW
-            _tmp_buffer[written] = 0;
-            written += 1;
+            int written = 5;
+            if (query != null)
+            {
+                written += Encoding.UTF8.GetBytes(query, writeBuffer.AsSpan(written));//NEW
+                writeBuffer[written] = 0;
+                written += 1;
+            }
+            _stream.Write(writeBuffer, 0, written);
+            _stream.Flush();
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(writeBuffer, 0, written));
         }
-        _stream.Write(_tmp_buffer,0,written);
-        _stream.Flush();
-        if (_logger?.IsEnabled(LogLevel.Debug) == true)
-            _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(_tmp_buffer,0,written));
+        finally
+        {
+            ReleaseQueryBuffer(writeBuffer, pooledWriteBuffer);
+        }
         _state = ConnectionState.Executing;
     }
 
@@ -1063,40 +1067,44 @@ public sealed class NzConnection : DbConnection
             await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
             await EnsureProtocolSyncedAsync(query, cancellationToken).ConfigureAwait(false);
         }
-        if (query is not null)
+        byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
+        try
         {
-            RegenerateBuffer(10 + 4 * query.Length);
-        }
-        _tmp_buffer[0] = (byte)'P';
-        if (_commandNumber != -1)
-        {
-            _commandNumber += 1;
-            Core.IPack(_commandNumber, _tmp_buffer.AsSpan(1));
-        }
-        else
-        {
-            _tmp_buffer[1] = 0xFF;
-            _tmp_buffer[2] = 0xFF;
-            _tmp_buffer[3] = 0xFF;
-            _tmp_buffer[4] = 0xFF;
-        }
+            writeBuffer[0] = (byte)'P';
+            if (_commandNumber != -1)
+            {
+                _commandNumber += 1;
+                Core.IPack(_commandNumber, writeBuffer.AsSpan(1));
+            }
+            else
+            {
+                writeBuffer[1] = 0xFF;
+                writeBuffer[2] = 0xFF;
+                writeBuffer[3] = 0xFF;
+                writeBuffer[4] = 0xFF;
+            }
 
-        if (_commandNumber > 100000)
-        {
-            _commandNumber = 1;
-        }
+            if (_commandNumber > 100000)
+            {
+                _commandNumber = 1;
+            }
 
-        int written = 5;
-        if (query != null)
-        {
-            written += Encoding.UTF8.GetBytes(query, _tmp_buffer.AsSpan(written));
-            _tmp_buffer[written] = 0;
-            written += 1;
+            int written = 5;
+            if (query != null)
+            {
+                written += Encoding.UTF8.GetBytes(query, writeBuffer.AsSpan(written));
+                writeBuffer[written] = 0;
+                written += 1;
+            }
+            await _stream.WriteAsync(writeBuffer.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
+            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            if (_logger?.IsEnabled(LogLevel.Debug) == true)
+                _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(writeBuffer, 0, written));
         }
-        await _stream.WriteAsync(_tmp_buffer.AsMemory(0, written), cancellationToken).ConfigureAwait(false);
-        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        if (_logger?.IsEnabled(LogLevel.Debug) == true)
-            _logger.LogDebug("Buffer sent to nps: {Buffer}", NzConnectionHelpers.ClientEncoding.GetString(_tmp_buffer, 0, written));
+        finally
+        {
+            ReleaseQueryBuffer(writeBuffer, pooledWriteBuffer);
+        }
         _state = ConnectionState.Executing;
     }
 
@@ -1918,8 +1926,7 @@ public sealed class NzConnection : DbConnection
         {
             // portal query command, no tuples returned
             int length = ReadProtocolLength("commandCompletePayloadLength");
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             HandleCommandComplete(data, length,  nzCommand);
             //returnet data informs about command type (SELECT/SET VARIABLE/...)
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -1944,8 +1951,7 @@ public sealed class NzConnection : DbConnection
         else if (_lastResponse == (byte)'P')//80
         {
             int length = ReadProtocolLength("preparedPayloadLength");
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
                 _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
             //doContinue = true;
@@ -1953,8 +1959,7 @@ public sealed class NzConnection : DbConnection
         else if (_lastResponse == (byte)BackendMessageCode.ErrorResponse)
         {
             int length = ReadProtocolLength("errorPayloadLength");
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             _backendException = new NetezzaException(BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)));
             _error = _backendException.Message;
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -1966,8 +1971,7 @@ public sealed class NzConnection : DbConnection
         {
             int length = ReadProtocolLength("rowDescriptionPayloadLength");
             nzCommand.NewPreparedStatement ??= new PreparedStatement();
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             HandleRowDescription(data, nzCommand);
             // We've got row_desc that allows us to identify what we're going to get back from this statement.
             //nzCommand.NewPreparedStatement.input_funcs = nzCommand.NewPreparedStatement!.Description!.GetFuncArray;
@@ -1975,16 +1979,14 @@ public sealed class NzConnection : DbConnection
         else if (_lastResponse == (byte)BackendMessageCode.DataRow)//read rows in schema/system queries - hot path
         {
             int length = ReadProtocolLength("dataRowPayloadLength");
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             HandleDataRow(data, nzCommand); 
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescriptionStandard)// metadata for standard query, occurs after BackendMessageCode.RowDescription
         {
             int length = ReadProtocolLength("rowDescriptionStandardPayloadLength");
             _tupdesc = new DbosTupleDesc();
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             ResGetDbosColumnDescriptions(data.AsSpan(0, length));
             //doContinue = true;
         }
@@ -2032,8 +2034,7 @@ public sealed class NzConnection : DbConnection
         else if (_lastResponse == (byte)BackendMessageCode.NoticeResponse)
         {
             int length = ReadProtocolLength("noticePayloadLength");
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             string notice = BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)).Message;
             OnNoticeReceived(notice, nzCommand);
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -2042,8 +2043,7 @@ public sealed class NzConnection : DbConnection
         else if (_lastResponse == (byte)'I')
         {
             int length = ReadProtocolLength("emptyQueryPayloadLength");
-            RegenerateBuffer(length);
-            var data = Read(length, _tmp_buffer);
+            var data = ReadMessagePayload(length);
             string notice = Encoding.UTF8.GetString(data[0..length]);
             OnNoticeReceived(notice, nzCommand);
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -2071,8 +2071,7 @@ public sealed class NzConnection : DbConnection
             int length = await ReadProtocolLengthAsync(
                 "commandCompletePayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             HandleCommandComplete(data, length, nzCommand);
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
                 _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
@@ -2096,8 +2095,7 @@ public sealed class NzConnection : DbConnection
             int length = await ReadProtocolLengthAsync(
                 "preparedPayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
                 _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
         }
@@ -2106,8 +2104,7 @@ public sealed class NzConnection : DbConnection
             int length = await ReadProtocolLengthAsync(
                 "errorPayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             _backendException = new NetezzaException(BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)));
             _error = _backendException.Message;
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -2119,8 +2116,7 @@ public sealed class NzConnection : DbConnection
                 "rowDescriptionPayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             nzCommand.NewPreparedStatement ??= new PreparedStatement();
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             HandleRowDescription(data, nzCommand);
         }
         else if (_lastResponse == (byte)BackendMessageCode.DataRow)
@@ -2128,8 +2124,7 @@ public sealed class NzConnection : DbConnection
             int length = await ReadProtocolLengthAsync(
                 "dataRowPayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             HandleDataRow(data, nzCommand);
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowDescriptionStandard)
@@ -2138,8 +2133,7 @@ public sealed class NzConnection : DbConnection
                 "rowDescriptionStandardPayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             _tupdesc = new DbosTupleDesc();
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             ResGetDbosColumnDescriptions(data.AsSpan(0, length));
         }
         else if (_lastResponse == (byte)BackendMessageCode.RowStandard)
@@ -2190,8 +2184,7 @@ public sealed class NzConnection : DbConnection
             int length = await ReadProtocolLengthAsync(
                 "noticePayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             string notice = BackendDiagnosticResponseParser.Parse(data.AsSpan(0, length)).Message;
             OnNoticeReceived(notice, nzCommand);
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -2202,8 +2195,7 @@ public sealed class NzConnection : DbConnection
             int length = await ReadProtocolLengthAsync(
                 "emptyQueryPayloadLength",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            RegenerateBuffer(length);
-            var data = await ReadAsync(length, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+            var data = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
             string notice = Encoding.UTF8.GetString(data, 0, length);
             OnNoticeReceived(notice, nzCommand);
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
@@ -2459,8 +2451,7 @@ public sealed class NzConnection : DbConnection
                 {
                     break;
                 }
-                RegenerateBuffer(numBytes);
-                var data = Read(numBytes, _tmp_buffer);
+                var data = ReadMessagePayload(numBytes);
                 if (status)
                 {
                     int maxCharCount = NzConnectionHelpers.ClientEncoding.GetMaxCharCount(numBytes);
@@ -2532,8 +2523,7 @@ public sealed class NzConnection : DbConnection
                 {
                     break;
                 }
-                RegenerateBuffer(numBytes);
-                var data = await ReadAsync(numBytes, _tmp_buffer, cancellationToken).ConfigureAwait(false);
+                var data = await ReadMessagePayloadAsync(numBytes, cancellationToken).ConfigureAwait(false);
                 if (status)
                 {
                     try
@@ -2798,6 +2788,18 @@ public sealed class NzConnection : DbConnection
 
 
     private byte[] _tmp_buffer;
+
+    /// <summary>
+    /// Maximum size of <see cref="_tmp_buffer"/> that is retained for the life of
+    /// the connection. Larger commands/messages use a transient pooled buffer
+    /// that is released after use, so one unusually large query does not pin a
+    /// multi-megabyte array on a pooled connection.
+    /// </summary>
+    internal const int TmpBufferRetainCap = 64 * 1024;
+    private byte[]? _largeReadBuffer;
+
+    internal int TmpBufferCapacity => _tmp_buffer.Length;
+
     private RowValue[]? _row;
 
     public bool UseStringPool { get; set; } = true;
@@ -3478,13 +3480,134 @@ public sealed class NzConnection : DbConnection
     private void RegenerateBuffer(int length)
     {
         ValidateProtocolLength(length, "bufferAllocation");
-        if (_tmp_buffer.Length < length)
+        if (length <= TmpBufferRetainCap && _tmp_buffer.Length < length)
         {
             if (_tmp_buffer.Length > 0)
             {
                 ArrayPool<byte>.Shared.Return(_tmp_buffer);
             }
             _tmp_buffer = ArrayPool<byte>.Shared.Rent(length);
+        }
+    }
+
+    /// <summary>
+    /// Releases the transient buffer used for payloads above
+    /// <see cref="TmpBufferRetainCap"/>. Safe to call when no message payload is
+    /// being processed.
+    /// </summary>
+    internal void ReleaseScratchBuffers()
+    {
+        var buffer = _largeReadBuffer;
+        if (buffer is not null)
+        {
+            _largeReadBuffer = null;
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private void ReleaseLargeReadBuffer()
+    {
+        var buffer = _largeReadBuffer;
+        if (buffer is not null)
+        {
+            _largeReadBuffer = null;
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Reads a protocol message payload, keeping the shared buffer only for
+    /// payloads up to <see cref="TmpBufferRetainCap"/> and using a transient
+    /// pooled buffer above that. The returned array is valid until the next
+    /// payload read.
+    /// </summary>
+    private byte[] ReadMessagePayload(int length)
+    {
+        ValidateProtocolLength(length, "bufferRead");
+        ReleaseLargeReadBuffer();
+        if (length <= TmpBufferRetainCap)
+        {
+            if (_tmp_buffer.Length < length)
+            {
+                if (_tmp_buffer.Length > 0)
+                {
+                    ArrayPool<byte>.Shared.Return(_tmp_buffer);
+                }
+                _tmp_buffer = ArrayPool<byte>.Shared.Rent(length);
+            }
+            _readBuffer!.ReadExactly(_tmp_buffer.AsSpan(0, length));
+            return _tmp_buffer;
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+        try
+        {
+            _readBuffer!.ReadExactly(rented.AsSpan(0, length));
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+            throw;
+        }
+        _largeReadBuffer = rented;
+        return rented;
+    }
+
+    private async ValueTask<byte[]> ReadMessagePayloadAsync(int length, CancellationToken cancellationToken)
+    {
+        ValidateProtocolLength(length, "bufferRead");
+        ReleaseLargeReadBuffer();
+        if (length <= TmpBufferRetainCap)
+        {
+            if (_tmp_buffer.Length < length)
+            {
+                if (_tmp_buffer.Length > 0)
+                {
+                    ArrayPool<byte>.Shared.Return(_tmp_buffer);
+                }
+                _tmp_buffer = ArrayPool<byte>.Shared.Rent(length);
+            }
+            await _readBuffer!.ReadExactlyAsync(_tmp_buffer.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
+            return _tmp_buffer;
+        }
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+        try
+        {
+            await _readBuffer!.ReadExactlyAsync(rented.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+            throw;
+        }
+        _largeReadBuffer = rented;
+        return rented;
+    }
+
+    /// <summary>
+    /// Returns a buffer for building an outbound query packet. The shared buffer
+    /// is used for commands up to <see cref="TmpBufferRetainCap"/>; larger
+    /// commands use a transient pooled buffer that must be passed to
+    /// <see cref="ReleaseQueryBuffer"/>.
+    /// </summary>
+    private byte[] RentQueryBuffer(int length, out bool pooled)
+    {
+        if (length <= TmpBufferRetainCap)
+        {
+            pooled = false;
+            RegenerateBuffer(length);
+            return _tmp_buffer;
+        }
+        pooled = true;
+        return ArrayPool<byte>.Shared.Rent(length);
+    }
+
+    private static void ReleaseQueryBuffer(byte[] buffer, bool pooled)
+    {
+        if (pooled)
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
@@ -4029,6 +4152,7 @@ public sealed class NzConnection : DbConnection
     public override void Close()
     {
         ReleaseLazyOversize();
+        ReleaseScratchBuffers();
         _lazyRowActive = false;
         _readBuffer?.Dispose();
         _readBuffer = null;
@@ -4051,6 +4175,7 @@ public sealed class NzConnection : DbConnection
     public override async Task CloseAsync()
     {
         ReleaseLazyOversize();
+        ReleaseScratchBuffers();
         _lazyRowActive = false;
         _readBuffer?.Dispose();
         _readBuffer = null;
