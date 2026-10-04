@@ -42,6 +42,20 @@ public sealed class NzCommand : DbCommand
 
     internal bool IsLazyRow => _lazyRow;
 
+    /// <summary>
+    /// Clears per-result references (row values, lazy flag, statement
+    /// metadata) before the physical connection goes idle in the pool.
+    /// The <c>RowValue[]</c> instance is retained for reuse.
+    /// </summary>
+    internal void ReleaseResultStateForPooling()
+    {
+        var row = _row;
+        if (row is not null)
+            Array.Clear(row);
+        _lazyRow = false;
+        NewPreparedStatement = null;
+    }
+
     public ref RowValue GetValue(int ordinal)
     {
         if (_lazyRow)
