@@ -226,6 +226,46 @@ internal static class NzParameterHelper
         int count = parameters.Count;
         Span<bool> used = count <= 128 ? stackalloc bool[count] : new bool[count];
 
+        // For larger collections a linear scan per placeholder is O(n*m).
+        // Build an open-addressing name table once; duplicate names fall back
+        // to the original linear scan so their "used" bookkeeping is unchanged.
+        const int HashThreshold = 8;
+        int[]? rentedBuckets = null;
+        Span<int> buckets = default;
+        int bucketMask = 0;
+        bool useHash = false;
+        if (count > HashThreshold)
+        {
+            int tableSize = 16;
+            while (tableSize < count * 2)
+                tableSize <<= 1;
+            rentedBuckets = ArrayPool<int>.Shared.Rent(tableSize);
+            buckets = rentedBuckets.AsSpan(0, tableSize);
+            buckets.Fill(-1);
+            bucketMask = tableSize - 1;
+            bool duplicates = false;
+            for (int idx = 0; idx < count && !duplicates; idx++)
+            {
+                var p = parameters[idx];
+                if (p.IsPositional)
+                    continue;
+                ReadOnlySpan<char> span = p.GetResolvedNameSpan();
+                int slot = NameHash(span) & bucketMask;
+                while (buckets[slot] != -1)
+                {
+                    if (parameters[buckets[slot]].GetResolvedNameSpan().Equals(span, StringComparison.OrdinalIgnoreCase))
+                    {
+                        duplicates = true;
+                        break;
+                    }
+                    slot = (slot + 1) & bucketMask;
+                }
+                if (!duplicates)
+                    buckets[slot] = idx;
+            }
+            useHash = !duplicates;
+        }
+
         // Rent from the pool instead of a StringBuilder: avoids both the
         // builder object and its private growable char[] per render.
         ValueStringBuilder sb = new ValueStringBuilder(ArrayPool<char>.Shared.Rent(sql.Length + 256));
@@ -248,16 +288,35 @@ internal static class NzParameterHelper
 
                 NzParameter? match = null;
                 int matchIdx = -1;
-                for (int idx = 0; idx < count; idx++)
+                if (useHash)
                 {
-                    var p = parameters[idx];
-                    if (p.IsPositional)
-                        continue;
-                    if (p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
+                    int slot = NameHash(nameSpan) & bucketMask;
+                    while (buckets[slot] != -1)
                     {
-                        match = p;
-                        matchIdx = idx;
-                        break;
+                        int idx = buckets[slot];
+                        var p = parameters[idx];
+                        if (!p.IsPositional && p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
+                        {
+                            match = p;
+                            matchIdx = idx;
+                            break;
+                        }
+                        slot = (slot + 1) & bucketMask;
+                    }
+                }
+                else
+                {
+                    for (int idx = 0; idx < count; idx++)
+                    {
+                        var p = parameters[idx];
+                        if (p.IsPositional)
+                            continue;
+                        if (p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
+                        {
+                            match = p;
+                            matchIdx = idx;
+                            break;
+                        }
                     }
                 }
 
@@ -265,16 +324,19 @@ internal static class NzParameterHelper
                 {
                     match.AppendSqlLiteral(ref sb);
                     used[matchIdx] = true;
-                    // Duplicate parameter entries can resolve to the same name
-                    // (e.g. "id" and ":id"). They all map to this placeholder, so
-                    // mark every later duplicate as used as well; otherwise they
-                    // would be reported as provided but not used. No equal name can
-                    // precede matchIdx because the scan stops at the first match.
-                    for (int idx = matchIdx + 1; idx < count; idx++)
+                    if (!useHash)
                     {
-                        var p = parameters[idx];
-                        if (!p.IsPositional && p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
-                            used[idx] = true;
+                        // Duplicate parameter entries can resolve to the same name
+                        // (e.g. "id" and ":id"). They all map to this placeholder, so
+                        // mark every later duplicate as used as well; otherwise they
+                        // would be reported as provided but not used. No equal name can
+                        // precede matchIdx because the scan stops at the first match.
+                        for (int idx = matchIdx + 1; idx < count; idx++)
+                        {
+                            var p = parameters[idx];
+                            if (!p.IsPositional && p.GetResolvedNameSpan().Equals(nameSpan, StringComparison.OrdinalIgnoreCase))
+                                used[idx] = true;
+                        }
                     }
                 }
                 else
@@ -309,7 +371,20 @@ internal static class NzParameterHelper
         finally
         {
             sb.Dispose();
+            if (rentedBuckets is not null)
+                ArrayPool<int>.Shared.Return(rentedBuckets);
         }
+    }
+
+    private static int NameHash(ReadOnlySpan<char> name)
+    {
+        uint hash = 2166136261u;
+        foreach (char c in name)
+        {
+            hash ^= char.ToUpperInvariant(c);
+            hash *= 16777619u;
+        }
+        return (int)(hash & 0x7FFFFFFF);
     }
 
     private static string RenderPositional(string sql, SqlTemplatePlan plan, NzParameterCollection parameters)
