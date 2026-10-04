@@ -798,3 +798,57 @@ checkout). Wartość zależna od maszyny; liczy się kierunek i brak CTS.
 ---
 
 ## DO NOT TOUCH WITHOUT PROFILING.
+
+---
+
+# Pool return-barrier fix (2026-10-04, cz. 5)
+
+Jeden realny P1 wskazany w review. Unit: **142 passed, 0 failed** (było 141;
++1 regresyjny test). CI (`.github/workflows/ci.yml`) uruchamia
+`--filter "Category=Unit"` na push do `master`.
+
+## Problem
+
+`_returnsDrained` był **jednorazowym** `TaskCompletionSource`. Po pierwszym
+cyklu Return `TrySetResult()` zostawiał go completed na zawsze, więc kolejny
+`DisposeAsync` widzący `_inFlightReturns > 0` awaituje **już ukończony** Task
+i idzie dalej, mimo że drugi `ReturnAsync` wciąż trwa. Dodatkowo istniał
+race `0 → Return`: `DisposeCoreAsync` mógł odczytać `_inFlightReturns == 0`
+tuż przed inkrementacją returnu.
+
+## Fix
+
+Bariera przeniesiona pod ten sam `_disposeLock`, który ustawia `_disposed`:
+
+- `TryBeginReturn()`: pod lockiem — jeśli `_disposed` → `false` (return idzie
+  ścieżką bezpośredniego zamknięcia, nie jest liczony); przy `0 → 1` tworzy
+  **świeży** TCS.
+- `EndReturn()`: pod lockiem dekrement; przy `0` przechwytuje TCS i zeruje
+  pole; `TrySetResult` poza lockiem.
+- `DisposeAsync()`: pod lockiem ustawia `_disposed` i **przechwytuje**
+  `_returnsDrained?.Task` (dokładny zbiór rozpoczętych returnów), przekazuje do
+  `DisposeCoreAsync`, który go awaituje.
+
+Ustawienie `_disposed` i `TryBeginReturn` pod tym samym lockiem zamyka race
+`0 → Return`; świeży TCS na każdy cykl zamyka bug jednorazowości.
+
+## Test
+
+`DisposeAsync_WaitsForInFlightReturn_AfterEarlierReturnCycle` (replay):
+1. pełny cykl rent/return (stara bariera byłaby już zużyta) →
+2. rent ponownie → 3. drugi return zatrzymany w `BeforeReturnCleanupForTests`
+→ 4. `DisposeAsync` → 5. **nie kończy się** → 6. zwolnienie →
+7. dispose kończy się → 8. `Total == Active == Idle == 0`,
+`DisposeCoreRunCount == 1`. Test zawsze zwalnia hook w `finally`, więc
+regresja kończy się szybkim `Assert`, nie zawieszeniem.
+
+Weryfikacja mutacyjna: tymczasowe pominięcie awajtu bariery w
+`DisposeCoreAsync` powoduje natychmiastowy fail testu; przywrócenie → zielono.
+
+## Decision
+
+**ACCEPTED.**
+
+---
+
+## STOP — DO NOT TOUCH WITHOUT PROFILING.

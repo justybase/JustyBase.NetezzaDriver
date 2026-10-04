@@ -331,6 +331,72 @@ public sealed class NzReplayTests
     }
 
     [Fact]
+    public async Task DisposeAsync_WaitsForInFlightReturn_AfterEarlierReturnCycle()
+    {
+        // Regression: the drain barrier used to be a one-shot TCS completed by
+        // the first return cycle, so a later in-flight return (and the 0→Return
+        // race) were not awaited. This reproduces the exact sequence.
+        var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        var pool = new NzConnectionPool(new NzConnectionStringBuilder
+        {
+            Host = "127.0.0.1",
+            Database = "JUST_DATA",
+            UserName = "replay",
+            Password = "replay",
+            Port = server.Port,
+            MaxPoolSize = 2,
+        });
+
+        // 1. First full rent/return cycle completes (old one-shot barrier
+        //    would already be consumed here).
+        var lease1 = await pool.RentAsync();
+        await lease1.DisposeAsync();
+        Assert.Equal(1, pool.TotalConnections);
+
+        // 2. Rent again (reuses the idle physical connection).
+        var lease2 = await pool.RentAsync();
+
+        // 3. Begin the second return and stall it before cleanup.
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pool.BeforeReturnCleanupForTests = _ =>
+        {
+            entered.TrySetResult(true);
+            return release.Task;
+        };
+        var ret = Task.Run(() => lease2.DisposeAsync().AsTask());
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+
+        // 4. Teardown starts.
+        var dispose = Task.Run(async () => await pool.DisposeAsync().ConfigureAwait(false));
+        bool disposeWaited;
+        try
+        {
+            // 5. Must not complete while Return #2 is in flight.
+            var early = await Task.WhenAny(dispose, Task.Delay(400)).ConfigureAwait(false);
+            disposeWaited = !ReferenceEquals(early, dispose);
+        }
+        finally
+        {
+            // Always release so a regression fails fast instead of hanging.
+            release.TrySetResult(true);
+        }
+
+        Assert.True(disposeWaited, "DisposeAsync completed while a ReturnAsync was still in flight.");
+
+        // 6. Release, then teardown completes.
+        await ret.ConfigureAwait(false);
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+
+        // 7. Nothing left behind.
+        Assert.Equal(1, pool.DisposeCoreRunCount);
+        Assert.Equal(0, pool.TotalConnections);
+        Assert.Equal(0, pool.ActiveCount);
+        Assert.Equal(0, pool.IdleCount);
+    }
+
+    [Fact]
     public async Task MaintenanceRefill_CancelAfterOpen_DisposesAndReleases()
     {
         var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");
