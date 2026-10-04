@@ -37,9 +37,11 @@ public sealed class NzConnectionPool : IAsyncDisposable
     internal int DisposeCoreRunCount;
     // Tracks ReturnAsync bodies in flight so teardown can wait for started
     // returns instead of finishing while a return still owns a connection.
+    // Guarded by _disposeLock, which also owns the _disposed transition, so a
+    // return and pool teardown can never interleave in a way that lets a
+    // started return escape the barrier.
     private int _inFlightReturns;
-    private readonly TaskCompletionSource _returnsDrained =
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource? _returnsDrained;
     private readonly Task _maintenanceTask;
 
     public NzConnectionPool(string host, string database, string user, string password,
@@ -275,16 +277,49 @@ public sealed class NzConnectionPool : IAsyncDisposable
 
     internal async Task ReturnAsync(NzConnection connection)
     {
-        Interlocked.Increment(ref _inFlightReturns);
+        bool tracked = TryBeginReturn();
         try
         {
-            await ReturnAsyncCore(connection).ConfigureAwait(false);
+            await ReturnAsyncCore(connection, tracked).ConfigureAwait(false);
         }
         finally
         {
-            if (Interlocked.Decrement(ref _inFlightReturns) == 0)
-                _returnsDrained.TrySetResult();
+            if (tracked)
+                EndReturn();
         }
+    }
+
+    /// <summary>
+    /// Registers a return as in-flight under the dispose lock. Returns false
+    /// once teardown has begun — such returns take the direct-close path and
+    /// are never counted, so the barrier captured by teardown is exact.
+    /// A fresh completion source is created on each idle→busy transition, so
+    /// the barrier is reusable across many rent/return cycles.
+    /// </summary>
+    private bool TryBeginReturn()
+    {
+        lock (_disposeLock)
+        {
+            if (_disposed)
+                return false;
+            if (_inFlightReturns++ == 0)
+                _returnsDrained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            return true;
+        }
+    }
+
+    private void EndReturn()
+    {
+        TaskCompletionSource? drained = null;
+        lock (_disposeLock)
+        {
+            if (--_inFlightReturns == 0)
+            {
+                drained = _returnsDrained;
+                _returnsDrained = null;
+            }
+        }
+        drained?.TrySetResult();
     }
 
     /// <summary>
@@ -293,9 +328,19 @@ public sealed class NzConnectionPool : IAsyncDisposable
     /// </summary>
     internal Func<NzConnection, Task>? BeforeReturnCleanupForTests;
 
-    private async Task ReturnAsyncCore(NzConnection connection)
+    private async Task ReturnAsyncCore(NzConnection connection, bool tracked)
     {
         bool removed = _active.TryRemove(connection, out _);
+        if (!tracked)
+        {
+            // Started after teardown claimed the pool: close directly and
+            // never touch the idle queue or synchronization primitives.
+            await DisposeConnectionAsync(connection).ConfigureAwait(false);
+            if (removed)
+                Interlocked.Decrement(ref _totalConnections);
+            return;
+        }
+
         if (BeforeReturnCleanupForTests is not null)
             await BeforeReturnCleanupForTests(connection).ConfigureAwait(false);
         if (_disposed)
@@ -676,14 +721,20 @@ public sealed class NzConnectionPool : IAsyncDisposable
             else
             {
                 _disposed = true;
-                task = DisposeCoreAsync();
+                // Capture the barrier for exactly the returns already
+                // in-flight. Setting _disposed under this same lock means no
+                // new tracked return can start after this point, closing the
+                // 0→Return race; a fresh TCS per cycle closes the one-shot
+                // TCS reuse bug.
+                var returnsToAwait = _returnsDrained?.Task;
+                task = DisposeCoreAsync(returnsToAwait);
                 _disposeTask = task;
             }
         }
         return new ValueTask(task);
     }
 
-    private async Task DisposeCoreAsync()
+    private async Task DisposeCoreAsync(Task? returnsToAwait)
     {
         DisposeCoreRunCount++;
 
@@ -701,10 +752,11 @@ public sealed class NzConnectionPool : IAsyncDisposable
         }
 
         // A ReturnAsync may have removed its entry from _active and still be
-        // rolling back / cleaning up. Wait for those to finish so no return
+        // rolling back / cleaning up. Wait for the barrier captured at
+        // dispose time (exact set of returns in-flight then) so no return
         // outlives teardown holding a connection and a count slot.
-        if (Volatile.Read(ref _inFlightReturns) > 0)
-            await _returnsDrained.Task.ConfigureAwait(false);
+        if (returnsToAwait is not null)
+            await returnsToAwait.ConfigureAwait(false);
 
         await ClearAsync().ConfigureAwait(false);
 
