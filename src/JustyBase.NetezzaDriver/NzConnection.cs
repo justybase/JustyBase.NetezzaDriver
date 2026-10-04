@@ -279,6 +279,16 @@ public sealed class NzConnection : DbConnection
 
 
     private const int _bufferSize = 65536; // 64 KB
+
+    /// <summary>
+    /// Size of the application-level read buffer created on open. Benchmarks
+    /// (ReplayReaderBench, ReadBufferSizeBench) show 8-64 KB are statistically
+    /// identical on the decode hot path; 16 KB keeps typical Netezza rows on the
+    /// in-place decode path while using 4x less retained memory per connection.
+    /// Internal so the trade-off can be measured without a public tuning knob.
+    /// </summary>
+    internal int ReadBufferSize { get; set; } = 16 * 1024;
+
     private Stream Initialize(string host, int port, bool useBufferedStream = true, bool setSocketBufferSizes = false)
     {
         try
@@ -4246,7 +4256,7 @@ public sealed class NzConnection : DbConnection
         {
             _stream = response;
             _readBuffer?.Dispose();
-            _readBuffer = new NzReadBuffer(_stream);
+            _readBuffer = new NzReadBuffer(_stream, ReadBufferSize);
             _protocolFaulted = false;
             _protocolRowNumber = 0;
             _currentProtocolRowNumber = 0;
@@ -4293,7 +4303,7 @@ public sealed class NzConnection : DbConnection
         {
             _stream = response;
             _readBuffer?.Dispose();
-            _readBuffer = new NzReadBuffer(_stream);
+            _readBuffer = new NzReadBuffer(_stream, ReadBufferSize);
             _protocolFaulted = false;
             _protocolRowNumber = 0;
             _currentProtocolRowNumber = 0;

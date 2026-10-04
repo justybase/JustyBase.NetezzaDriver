@@ -19,7 +19,7 @@ internal sealed class NzReadBuffer
     private int _filled;
     private long _consumed;
 
-    public NzReadBuffer(Stream stream, int size = 65536)
+    public NzReadBuffer(Stream stream, int size = 16384)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         if (size <= 0)
