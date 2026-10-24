@@ -45,6 +45,54 @@ public sealed class PoolAndMetadataTests
     }
 
     [Fact]
+    public void Sylvan_LastHit_RepeatReturnsSameReference()
+    {
+        var pool = new Sylvan();
+        string a = pool.GetString("Saturday".AsSpan());
+        for (int i = 0; i < 10; i++)
+            Assert.Same(a, pool.GetString("Saturday".AsSpan()));
+    }
+
+    [Fact]
+    public void Sylvan_LastHit_AlternatingValuesStayCorrect()
+    {
+        var pool = new Sylvan();
+        string a = pool.GetString("January".AsSpan());
+        string b = pool.GetString("February".AsSpan());
+        // Alternate: every lookup must resolve to the right instance.
+        for (int i = 0; i < 10; i++)
+        {
+            Assert.Same(a, pool.GetString("January".AsSpan()));
+            Assert.Same(b, pool.GetString("February".AsSpan()));
+        }
+    }
+
+    [Fact]
+    public void Sylvan_LastHit_SameLengthDifferentValueIsCorrect()
+    {
+        var pool = new Sylvan();
+        string a = pool.GetString("abcd".AsSpan());
+        // Same length, different content: failed fast-compare must fall
+        // through to the table instead of returning the cached string.
+        string b = pool.GetString("abce".AsSpan());
+        Assert.Equal("abce", b);
+        Assert.NotSame(a, b);
+        Assert.Same(a, pool.GetString("abcd".AsSpan()));
+        Assert.Same(b, pool.GetString("abce".AsSpan()));
+    }
+
+    [Fact]
+    public void Sylvan_LastHit_LongStringsStillBypassPool()
+    {
+        var pool = new Sylvan();
+        pool.GetString("short".AsSpan());
+        string longText = new string('y', 64);
+        string a = pool.GetString(longText.AsSpan());
+        string c = pool.GetString(longText.AsSpan());
+        Assert.NotSame(a, c);
+    }
+
+    [Fact]
     public void DbosTupleDesc_Initialize_AllocatesExactArrays()
     {
         var desc = new DbosTupleDesc();

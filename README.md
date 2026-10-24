@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/JustyBase.NetezzaDriver)](https://www.nuget.org/packages/JustyBase.NetezzaDriver)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0-512BD4)](https://dotnet.microsoft.com/)
+[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0%20%7C%2011.0-512BD4)](https://dotnet.microsoft.com/)
 
 A **pure C# ADO.NET driver** for IBM Netezza Performance Server (NPS) — no native dependencies, no ODBC bridge. The code is based on [nzpy](https://github.com/IBM/nzpy) (Python) and [npgsql](https://github.com/npgsql/npgsql) (PostgreSQL).
 
@@ -29,7 +29,7 @@ A **pure C# ADO.NET driver** for IBM Netezza Performance Server (NPS) — no nat
 dotnet add package JustyBase.NetezzaDriver
 ```
 
-The package targets **.NET 8**, **.NET 9**, and **.NET 10**.
+The package targets **.NET 8**, **.NET 9**, **.NET 10** and **.NET 11**.
 
 ## Quick start
 

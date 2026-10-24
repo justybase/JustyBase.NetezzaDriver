@@ -919,3 +919,56 @@ Teardown wyrywał socket spod trwającego draina/kwerendy: `_readBuffer == null`
 ---
 
 ## STOP — DO NOT TOUCH WITHOUT PROFILING.
+
+---
+
+# net11.0 target + net10 vs net11 replay comparison (2026-10-24)
+
+## Target change
+
+- `JustyBase.NetezzaDriver`: `TargetFrameworks` = `net8.0;net9.0;net10.0;net11.0`,
+  `Microsoft.Extensions.Logging.Abstractions` `11.0.0-rc.2.26504.105` for `net11.0`
+  (RC pin; move to stable at .NET 11 GA).
+- `TestSupport`, `Tests`, `Benchmarks`: `net10.0;net11.0` (benchmarks need the
+  net11.0 host to compare runtimes).
+- `BenchmarkDotNet` `0.15.8` -> `0.16.0-preview.2` (benchmarks project only):
+  0.15.8 throws `NotImplementedException: GetRuntimeVersion not implemented for
+  NotRecognized` on the net11 host; preview.2 recognizes it.
+- `ci.yml`: `setup-dotnet` installs `10.0.x` and `11.0.x`.
+- Unit: **144 passed, 0 failed on both `net10.0` and `net11.0`**.
+
+## Comparison method (JIT, not NativeAOT)
+
+`ReplayReaderBench` (loopback `NzReplayServer`, no DB latency) under
+`dotnet run -c Release -f net10.0|net11.0`, `ShortRunJob`, `MemoryDiagnoser`,
+BDN 0.16.0-preview.2. `PublishAot` was set to `false` for these runs only
+(repo keeps `true`): with `true`, BDN's generated project goes through full
+ILC publish (~80 s per build) on both runtimes. Results below are JIT.
+
+## Numbers (Mean, ShortRun N=3 — noisy, see caveat)
+
+| Benchmark | DimDate net10 | DimDate net11 | Fact net10 | Fact net11 |
+|---|---:|---:|---:|---:|
+| full decode, no GetValue | 1231 us | 1174 us (-5%) | 31.1 ms | 23.6 ms (-24%) |
+| Sync_GetValue | 1795 us | 1665 us (-7%) | 89.1 ms* | 32.4 ms |
+| Sync_GetValue_Lazy | 1945 us | 1957 us (+1%) | 50.0 ms | 37.9 ms |
+| Async_GetValue | 3248 us | 2244 us | 54.6 ms | 52.9 ms |
+| Allocated | identical | identical | identical | identical |
+
+\* net10 `Sync_GetValue` Fact 89 ms (StdDev 4.9 ms) contradicts the same
+machine's steady ~30 ms in the 15-iteration harness and the net11 32 ms run;
+ShortRun N=3 on a shared loopback server in WSL is load-sensitive. Do not
+read the 89->32 ms delta as a 2.7x runtime effect.
+
+## Reading
+
+- Allocations are identical across runtimes (same code, same pooling).
+- Pure-decode benches (`no GetValue`) trend faster on net11 (-5% dimdate,
+  -24% fact); consistent with the .NET 11 JIT bounds-check-elision shapes
+  (`data.Length >= CNS` + `Slice(CNS)`) that our row loop uses, but inside
+  ShortRun noise — treat as "no slower, possibly faster", not a fixed ratio.
+- No benchmark regressed outside noise except the tainted 89 ms cell above.
+- Decision: **ACCEPTED** (net11.0 target stays; BDN preview reverts to stable
+  0.16 when released).
+
+## STOP — DO NOT TOUCH WITHOUT PROFILING.

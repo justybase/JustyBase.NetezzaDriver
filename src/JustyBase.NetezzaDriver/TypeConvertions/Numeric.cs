@@ -1,4 +1,5 @@
-﻿using System.Globalization;
+﻿using System.Buffers.Binary;
+using System.Globalization;
 
 namespace JustyBase.NetezzaDriver.TypeConvertions;
 
@@ -122,6 +123,36 @@ internal sealed class Numeric
     /// <returns>The converted decimal value.</returns>
     public static decimal GetCsNumeric(ReadOnlySpan<byte> data, int prec, int scale, int digitCount)
     {
+        // Fast path for the common positive case that fits in 64 bits
+        // (prec <= 18, scale <= 28): avoids two 32-byte stackallocs,
+        // sign-extension loops and the 128-bit negate. Negative values and
+        // wider precisions fall through to the general path below.
+        // Fact fixture is NUMERIC(11,6) positive; dimdate has no numerics.
+        if ((uint)prec <= 18u && (uint)scale <= 28u)
+        {
+            int fastParts = prec <= 9 ? 1 : 2;
+            if (digitCount == fastParts)
+            {
+                if (fastParts == 1)
+                {
+                    uint p0 = BinaryPrimitives.ReadUInt32LittleEndian(data);
+                    if ((p0 & SignMaskUint) == 0)
+                    {
+                        return new decimal((int)p0, 0, 0, false, (byte)scale);
+                    }
+                }
+                else
+                {
+                    uint p0 = BinaryPrimitives.ReadUInt32LittleEndian(data);
+                    if ((p0 & SignMaskUint) == 0)
+                    {
+                        uint p1 = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4));
+                        return new decimal((int)p1, (int)p0, 0, false, (byte)scale);
+                    }
+                }
+            }
+        }
+
         int numParts = prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
 
         Span<long> dataP = stackalloc long[4];

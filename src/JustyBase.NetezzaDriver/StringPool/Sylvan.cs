@@ -43,6 +43,15 @@ public sealed class Sylvan
 
     int count;
 
+    // Single-entry last-hit cache. Row data is usually grouped/sorted
+    // (month names repeat ~30 rows in a row, flags repeat in runs), so the
+    // next lookup very often repeats the previous value. One length check
+    // + one SequenceEqual then skips the hash computation and bucket walk
+    // entirely; on a miss the cost is just the failed length check.
+    // Only covers the pooled path (short strings); the long-string bypass
+    // below stays allocation-per-call by design (see unit test).
+    string? _lastHit;
+
 
     /// <summary>
     /// Creates a new StringPool instance.
@@ -75,6 +84,12 @@ public sealed class Sylvan
             return new string(buffer);
         }
 
+        var last = _lastHit;
+        if (last is not null && last.Length == length && buffer.SequenceEqual(last.AsSpan()))
+        {
+            return last;
+        }
+
         var entries = this.entries;
         var hashCode = GetHashCode(buffer, 0, length);
 
@@ -88,6 +103,7 @@ public sealed class Sylvan
             str = e.str;
             if (e.hashCode == hashCode && buffer.SequenceEqual(str.AsSpan()))
             {
+                _lastHit = str;
                 return str;
             }
 
@@ -124,6 +140,7 @@ public sealed class Sylvan
         entry.str = str;
 
         bucket = index + 1; // bucket is an int ref
+        _lastHit = str;
 
         return str;
     }
@@ -172,7 +189,7 @@ public sealed class Sylvan
     ref int GetBucket(uint hashCode)
     {
         int[] buckets = this.buckets;
-        return ref buckets[hashCode & (uint)buckets.Length - 1];
+        return ref buckets[hashCode & ((uint)buckets.Length - 1)];
     }
 
     struct Entry
