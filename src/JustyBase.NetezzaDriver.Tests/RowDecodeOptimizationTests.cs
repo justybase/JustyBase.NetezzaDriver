@@ -22,6 +22,22 @@ public sealed class RowDecodeOptimizationTests
         Assert.Equal(new[] { 3, 7, 13 }, offsets);
     }
 
+    [Fact]
+    public void FillVariableFieldOffsetsReadsLengthPrefixAsUnsigned()
+    {
+        // VARCHAR(64000) values of 32766+ characters have a length prefix
+        // >= 32768; read as signed it was negative and the row was rejected.
+        const int longLength = 32770; // 2-byte prefix + 32768 characters
+        byte[] row = new byte[longLength + 4];
+        BitConverter.GetBytes((ushort)longLength).CopyTo(row, 0);
+        BitConverter.GetBytes((ushort)4).CopyTo(row, longLength);
+        int[] offsets = new int[2];
+
+        NzConnection.FillVariableFieldOffsets(row, fixedOffset: 0, offsets);
+
+        Assert.Equal(new[] { 0, longLength }, offsets);
+    }
+
     [Theory]
     [InlineData(0, 0, 2)]
     [InlineData(0, 4, 3)]

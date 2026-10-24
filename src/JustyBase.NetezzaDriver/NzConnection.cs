@@ -3340,7 +3340,7 @@ public sealed class NzConnection : DbConnection
                 case NzTypeJsonb:
                 case NzTypeJsonpath:
                 {
-                    int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
                     string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
                     rowValue.typeCode = TypeCodeEx.String;
                     rowValue.stringValue = value;
@@ -3360,7 +3360,7 @@ public sealed class NzConnection : DbConnection
                 case NzTypeNChar:
                 case NzTypeNVarChar:
                 {
-                    int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
                     string value;
                     if (fldtype == NzTypeNVarChar || fldlen == cursize)
                     {
@@ -3546,7 +3546,7 @@ public sealed class NzConnection : DbConnection
             case NzTypeJsonb:
             case NzTypeJsonpath:
             {
-                int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
                 string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
                 rowValue.typeCode = TypeCodeEx.String;
                 rowValue.stringValue = value;
@@ -3566,7 +3566,7 @@ public sealed class NzConnection : DbConnection
             case NzTypeNChar:
             case NzTypeNVarChar:
             {
-                int cursize = BitConverter.ToInt16(fieldDataP) - 2;
+                int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
                 string value;
                 if (fldtype == NzTypeNVarChar || fldlen == cursize)
                 {
@@ -4025,7 +4025,7 @@ public sealed class NzConnection : DbConnection
             if (position > data.Length - sizeof(short))
                 throw new InvalidDataException("The varying-field length prefix is truncated.");
 
-            int length = BitConverter.ToInt16(data.Slice(position, sizeof(short)));
+            int length = BitConverter.ToUInt16(data.Slice(position, sizeof(short)));
             if (length < sizeof(short))
                 throw new InvalidDataException("The varying-field length is invalid.");
 

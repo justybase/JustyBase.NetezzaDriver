@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace JustyBase.NetezzaDriver.Tests;
 
 [Trait("Category", "Integration")]
@@ -583,32 +585,12 @@ public class PoolUnitTests
         using var connection = new NzConnection("user", "pass", "host", "db");
         using var cmd = new NzCommand(connection);
 
-        string big1 = new string('x', 1_000_000);
-        string big2 = new string('y', 1_000_000);
-        var cmdRow = new RowValue[2];
-        cmdRow[0].typeCode = TypeCodeEx.String;
-        cmdRow[0].stringValue = big1;
-        cmdRow[1].typeCode = TypeCodeEx.Int32;
-        cmdRow[1].int32Value = 42;
-        cmd.AddRow(cmdRow);
-        var connRow = new RowValue[2];
-        connRow[0].typeCode = TypeCodeEx.String;
-        connRow[0].stringValue = big2;
-        connection.SetConnectionRowForTests(connRow);
-        cmd.NewPreparedStatement = new PreparedStatement { Sql = "SELECT 1" };
-        connection.SimulateTransientBuffersForTests(4096);
-
-        var weak1 = new WeakReference(big1);
-        var weak2 = new WeakReference(big2);
+        var (weak1, weak2) = FillResultStateWithLargeStrings(connection, cmd);
 
         // Same calls the pool makes when a connection goes idle.
         connection.ReleaseTransientBuffers();
         connection.ReleaseResultStateForPooling();
 
-        big1 = null!;
-        big2 = null!;
-        cmdRow = null!;
-        connRow = null!;
         for (int i = 0; i < 3; i++)
         {
             GC.Collect();
@@ -623,6 +605,30 @@ public class PoolUnitTests
         // Reusable buffers kept: row access still works, now DBNull.
         Assert.True(cmd.IsDBNullFast(0));
         Assert.Equal(DBNull.Value, cmd.GetValue(0).GetValue());
+    }
+
+    // Kept out of the test method so no local or JIT temporary in its frame
+    // references the strings: Debug builds keep those alive until the method
+    // returns, which made the WeakReference assertions fail without a leak.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference Command, WeakReference Connection) FillResultStateWithLargeStrings(
+        NzConnection connection, NzCommand cmd)
+    {
+        string big1 = new string('x', 1_000_000);
+        string big2 = new string('y', 1_000_000);
+        var cmdRow = new RowValue[2];
+        cmdRow[0].typeCode = TypeCodeEx.String;
+        cmdRow[0].stringValue = big1;
+        cmdRow[1].typeCode = TypeCodeEx.Int32;
+        cmdRow[1].int32Value = 42;
+        cmd.AddRow(cmdRow);
+        var connRow = new RowValue[2];
+        connRow[0].typeCode = TypeCodeEx.String;
+        connRow[0].stringValue = big2;
+        connection.SetConnectionRowForTests(connRow);
+        cmd.NewPreparedStatement = new PreparedStatement { Sql = "SELECT 1" };
+        connection.SimulateTransientBuffersForTests(4096);
+        return (new WeakReference(big1), new WeakReference(big2));
     }
 }
 
