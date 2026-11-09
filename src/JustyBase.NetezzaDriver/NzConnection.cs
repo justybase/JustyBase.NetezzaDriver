@@ -432,6 +432,9 @@ public sealed class NzConnection : DbConnection
 
             Canceling.WriteCancelRequest(stream2, pid, secretKey);
             stream2.Flush();
+            // The cancel acknowledgement is best effort: never let a silent
+            // backend block the caller for the whole connection timeout.
+            socketX.ReceiveTimeout = ProtocolSyncTimeoutMs;
             var count = stream2.ReadByte();
             stream2.Dispose();
             //Error = "Query canceled";
@@ -1323,6 +1326,45 @@ public sealed class NzConnection : DbConnection
         }
     }
 
+    /// <summary>
+    /// Starts a wall-clock timer for a synchronous command. The old
+    /// <see cref="HandleTimeout"/> only polled once before reading and treated
+    /// the always-present backend preamble as progress, so a long query could
+    /// block for the whole socket receive timeout. The timer cancels the query
+    /// at the command deadline while the normal read loop drains the response.
+    /// </summary>
+    private Timer? StartCommandTimeoutTimer()
+    {
+        var timeout = CommandTimeout;
+        if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
+        {
+            return null;
+        }
+
+        var dueMilliseconds = (long)Math.Ceiling(timeout.TotalMilliseconds);
+        dueMilliseconds = Math.Clamp(dueMilliseconds, 1, int.MaxValue);
+        return new Timer(
+            _ =>
+            {
+                try
+                {
+                    CancelQuery();
+                }
+                catch (Exception error)
+                {
+                    _logger?.LogWarning(error, "Cancel request failed after a command timeout.");
+                }
+                finally
+                {
+                    Volatile.Write(ref _error, "Command timeout");
+                    _backendException = null;
+                }
+            },
+            null,
+            (int)dueMilliseconds,
+            Timeout.Infinite);
+    }
+
     private CancellationTokenSource? _cachedTimeoutCts;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1383,10 +1425,12 @@ public sealed class NzConnection : DbConnection
     public bool Execute(NzCommand nzCommand, string query)
     {
         PreExecution(nzCommand, query);
-        HandleTimeout();
         _nextRelatedFileStream = null!;
 
+        using var timeoutTimer = StartCommandTimeoutTimer();
         while (DoNextStep(nzCommand)) ;
+        timeoutTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+
         var response = true;
 
         if (_error != null)
@@ -1420,11 +1464,81 @@ public sealed class NzConnection : DbConnection
             }
             catch (OperationCanceledException) when (IsCommandTimeout(timeoutSource, cancellationToken))
             {
-                CancelQuery();
-                _error = "Command timeout";
-                _backendException = null;
-                throw new NetezzaException(_error);
+                await HandleCommandTimeoutAsync(nzCommand).ConfigureAwait(false);
+                throw new NetezzaException("Command timeout");
             }
+        }
+    }
+
+    /// <summary>
+    /// Cancels a timed-out command and drains the response the backend sends
+    /// for the cancel request (usually ErrorResponse + ReadyForQuery). Without
+    /// the drain, the next command mistakes those frames for its own response.
+    /// </summary>
+    private async Task HandleCommandTimeoutAsync(NzCommand nzCommand)
+    {
+        try
+        {
+            CancelQuery();
+        }
+        catch (Exception cancelError)
+        {
+            _logger?.LogWarning(cancelError, "Cancel request failed after a command timeout.");
+            _protocolFaulted = true;
+            _error = "Command timeout";
+            _backendException = null;
+            return;
+        }
+
+        if (!await DrainCancelledResponseAsync(nzCommand).ConfigureAwait(false))
+        {
+            _protocolFaulted = true;
+        }
+        _error = "Command timeout";
+        _backendException = null;
+    }
+
+    /// <summary>
+    /// Consumes the response left behind by <see cref="CancelQuery"/> up to
+    /// ReadyForQuery. Rows are discarded without decoding. Returns false when
+    /// the stream could not be resynchronized (the connection must reconnect).
+    /// </summary>
+    private async Task<bool> DrainCancelledResponseAsync(NzCommand nzCommand)
+    {
+        using var drainSource = new CancellationTokenSource(ProtocolSyncTimeoutMs);
+        try
+        {
+            while (true)
+            {
+                if (_shouldReadByte)
+                {
+                    await ReadNextResponseByteAsync(drainSource.Token).ConfigureAwait(false);
+                }
+
+                var more = await IntepretReturnedByteAsync(
+                    nzCommand,
+                    drainSource.Token,
+                    discardRows: true).ConfigureAwait(false);
+                if (!more)
+                {
+                    return true;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger?.LogWarning("Timed out while draining the cancelled response; reconnect is required.");
+            return false;
+        }
+        catch (Exception error) when (IsProtocolTeardownException(error))
+        {
+            _logger?.LogWarning(error, "Connection closed while draining the cancelled response.");
+            return false;
+        }
+        catch (Exception error)
+        {
+            _logger?.LogWarning(error, "Malformed response while draining the cancelled command.");
+            return false;
         }
     }
 
@@ -1461,10 +1575,8 @@ public sealed class NzConnection : DbConnection
             }
             catch (OperationCanceledException) when (IsCommandTimeout(timeoutSource, cancellationToken))
             {
-                CancelQuery();
-                _error = "Command timeout";
-                _backendException = null;
-                throw new NetezzaException(_error);
+                await HandleCommandTimeoutAsync(nzCommand).ConfigureAwait(false);
+                throw new NetezzaException("Command timeout");
             }
         }
     }
@@ -3335,7 +3447,6 @@ public sealed class NzConnection : DbConnection
                 case NzTypeVarChar:
                 case NzTypeVarFixedChar:
                 case NzTypeGeometry:
-                case NzTypeVarBinary:
                 case NzTypeJson:
                 case NzTypeJsonb:
                 case NzTypeJsonpath:
@@ -3345,6 +3456,25 @@ public sealed class NzConnection : DbConnection
                     rowValue.typeCode = TypeCodeEx.String;
                     rowValue.stringValue = value;
                     if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                    break;
+                }
+
+                case NzTypeVarBinary:
+                {
+                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                    byte[] value = fieldDataP.Slice(2, cursize).ToArray();
+                    rowValue.typeCode = TypeCodeEx.Object;
+                    rowValue.objectValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=VARBINARY, bytes={Value}", curField + 1, value.Length);
+                    break;
+                }
+
+                case NzTypeBinary:
+                {
+                    byte[] value = fieldDataP.Slice(0, fldlen).ToArray();
+                    rowValue.typeCode = TypeCodeEx.Object;
+                    rowValue.objectValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=BINARY, bytes={Value}", curField + 1, value.Length);
                     break;
                 }
 
@@ -3497,7 +3627,16 @@ public sealed class NzConnection : DbConnection
                     {
                         value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
                     }
-                    catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentOutOfRangeException or InvalidCastException)
+                    catch (OverflowException)
+                    {
+                        // System.Decimal tops out at ~7.9e28. Wider NUMERIC values
+                        // (up to NUMERIC(38)) stay exact as text.
+                        rowValue.typeCode = TypeCodeEx.String;
+                        rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, rowValue.stringValue);
+                        break;
+                    }
+                    catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException or InvalidCastException)
                     {
                         throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
                     }
@@ -3541,7 +3680,6 @@ public sealed class NzConnection : DbConnection
             case NzTypeVarChar:
             case NzTypeVarFixedChar:
             case NzTypeGeometry:
-            case NzTypeVarBinary:
             case NzTypeJson:
             case NzTypeJsonb:
             case NzTypeJsonpath:
@@ -3551,6 +3689,25 @@ public sealed class NzConnection : DbConnection
                 rowValue.typeCode = TypeCodeEx.String;
                 rowValue.stringValue = value;
                 if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                break;
+            }
+
+            case NzTypeVarBinary:
+            {
+                int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                byte[] value = fieldDataP.Slice(2, cursize).ToArray();
+                rowValue.typeCode = TypeCodeEx.Object;
+                rowValue.objectValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=VARBINARY, bytes={Value}", curField + 1, value.Length);
+                break;
+            }
+
+            case NzTypeBinary:
+            {
+                byte[] value = fieldDataP.Slice(0, fldlen).ToArray();
+                rowValue.typeCode = TypeCodeEx.Object;
+                rowValue.objectValue = value;
+                if (logDebug) _logger?.LogDebug("field={Field}, datatype=BINARY, bytes={Value}", curField + 1, value.Length);
                 break;
             }
 
@@ -3701,7 +3858,16 @@ public sealed class NzConnection : DbConnection
                 {
                     value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
                 }
-                catch (Exception ex) when (ex is FormatException or OverflowException or ArgumentOutOfRangeException or InvalidCastException)
+                catch (OverflowException)
+                {
+                    // System.Decimal tops out at ~7.9e28. Wider NUMERIC values
+                    // (up to NUMERIC(38)) stay exact as text.
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, rowValue.stringValue);
+                    break;
+                }
+                catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException or InvalidCastException)
                 {
                     throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
                 }
@@ -4099,8 +4265,10 @@ public sealed class NzConnection : DbConnection
                         rowValue.boolValue = NzConnectionHelpers.BoolRecvTyped(data, dataIdx, vlen - 4);
                         break;
                     case 17: // bytea
-                        rowValue.typeCode = TypeCodeEx.String; 
-                        rowValue.stringValue = NzConnectionHelpers.ByteaRecv(data, dataIdx, vlen - 4);
+                    case 2568: // varbinary(n)
+                    case 2569: // varbinary
+                        rowValue.typeCode = TypeCodeEx.Object;
+                        rowValue.objectValue = NzConnectionHelpers.VarbinaryInTyped(data, dataIdx, vlen - 4);
                         break;
                     case 19: // name type
                         rowValue.typeCode = TypeCodeEx.String;
@@ -4179,8 +4347,16 @@ public sealed class NzConnection : DbConnection
                         rowValue.stringValue = NzConnectionHelpers.IntervalRecvInteger(data, dataIdx, vlen - 4);
                         break;
                     case 1700: // NUMERIC
-                        rowValue.typeCode = TypeCodeEx.Decimal;
-                        rowValue.decimalValue = NzConnectionHelpers.NumericInTyped(data, dataIdx, vlen - 4);
+                        try
+                        {
+                            rowValue.typeCode = TypeCodeEx.Decimal;
+                            rowValue.decimalValue = NzConnectionHelpers.NumericInTyped(data, dataIdx, vlen - 4);
+                        }
+                        catch (OverflowException)
+                        {
+                            rowValue.typeCode = TypeCodeEx.String;
+                            rowValue.stringValue = Encoding.ASCII.GetString(data, dataIdx, vlen - 4);
+                        }
                         break;
                     case 2275: // cstring
                         rowValue.typeCode = TypeCodeEx.String;

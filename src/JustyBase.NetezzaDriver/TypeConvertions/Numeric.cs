@@ -155,13 +155,44 @@ internal sealed class Numeric
 
         int numParts = prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
 
+        Span<long> varPdata = stackalloc long[4];
+        bool isMinus = PrepareNumeric128(data, numParts, digitCount, varPdata);
+
+        if (IsValidDecimal((int)varPdata[0]))
+        {
+            var dc1 = new decimal((int)varPdata[3], (int)varPdata[2], (int)varPdata[1], isMinus, (byte)scale);
+            return dc1;
+        }
+
+        return GetNumericFromChars(scale, varPdata, isMinus);
+    }
+
+    /// <summary>
+    /// Returns the exact decimal text of a Netezza NUMERIC value.
+    /// Used when the value is wider than <see cref="decimal"/> can represent
+    /// (for example NUMERIC(38,8)).
+    /// </summary>
+    public static string GetNumericString(ReadOnlySpan<byte> data, int prec, int scale, int digitCount)
+    {
+        int numParts = prec <= 9 ? 1 : prec <= 18 ? 2 : 4;
+        Span<long> varPdata = stackalloc long[4];
+        bool isMinus = PrepareNumeric128(data, numParts, digitCount, varPdata);
+        return GetNumericChars(scale, varPdata, isMinus);
+    }
+
+    /// <summary>
+    /// Loads the Netezza base-2^32 limbs into a 128-bit little-endian buffer,
+    /// sign-extends them and negates negative values. Returns true when the
+    /// value is negative.
+    /// </summary>
+    private static bool PrepareNumeric128(ReadOnlySpan<byte> data, int numParts, int digitCount, Span<long> varPdata)
+    {
         Span<long> dataP = stackalloc long[4];
         for (int index = 0; index < numParts; ++index)
         {
             dataP[index] = BitConverter.ToUInt32(data[(index * 4)..]);
         }
 
-        Span<long> varPdata = stackalloc long[4];
         var sign = (dataP[0] & SignMaskUint) != 0 ? -1 : 0;
         int i = 0;
         while (i < MAX_NUMERIC_DIGIT_COUNT - digitCount)
@@ -177,20 +208,11 @@ internal sealed class Numeric
             i++;
             j++;
         }
-        //varPdata.CopyTo(dataP);
 
         bool isMinus = IsNumericDataNegative(varPdata);
-        //if negative -> negate, Negate128 mutates varPdata
         if (isMinus && Negate128(varPdata))
             throw new FormatException("Numeric value could not be converted from Netezza binary format.");
-
-        if (IsValidDecimal((int)varPdata[0]))
-        {
-            var dc1 = new decimal((int)varPdata[3], (int)varPdata[2], (int)varPdata[1], isMinus, (byte)scale);
-            return dc1;
-        }
-
-        return GetNumericFromChars(scale, varPdata, isMinus);
+        return isMinus;
     }
 
     /// <summary>
@@ -201,6 +223,18 @@ internal sealed class Numeric
     /// <param name="isMinus">Indicates if the numeric data is negative.</param>
     /// <returns>The converted decimal value.</returns>
     private static decimal GetNumericFromChars(int scale, Span<long> dataBufferV2, bool isMinus)
+    {
+        return decimal.Parse(
+            GetNumericChars(scale, dataBufferV2, isMinus),
+            NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+            provider: CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Builds the exact decimal text (with the sign and decimal point) for a
+    /// 128-bit numeric magnitude.
+    /// </summary>
+    private static string GetNumericChars(int scale, Span<long> dataBufferV2, bool isMinus)
     {
         Span<int> intDigits = stackalloc int[NUMERIC_MAX_PRECISION];
         Span<byte> charDigits = stackalloc byte[NUMERIC_MAX_PRECISION];
@@ -240,6 +274,6 @@ internal sealed class Numeric
             charDigits.Slice(0, length).CopyTo(charDigitsWithSignDot.Slice(nm));
             nm += length;
         }
-        return decimal.Parse(charDigitsWithSignDot.Slice(0, nm), NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, provider: CultureInfo.InvariantCulture);
+        return System.Text.Encoding.ASCII.GetString(charDigitsWithSignDot.Slice(0, nm));
     }
 }

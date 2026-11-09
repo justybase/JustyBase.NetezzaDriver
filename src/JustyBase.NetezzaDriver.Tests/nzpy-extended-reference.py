@@ -33,7 +33,7 @@ async def main():
     connection = await nzpy_extended.connect(
         user=os.getenv("NZ_DEV_USER", "admin"),
         password=os.getenv("NZ_DEV_PASSWORD", "password"),
-        host=os.getenv("NZ_DEV_HOST", "192.168.0.144"),
+        host=os.getenv("NZ_DEV_HOST", "127.0.0.1"),
         port=int(os.getenv("NZ_DEV_PORT", "5480")),
         database=os.getenv("NZ_DEV_DB", "JUST_DATA"),
     )

@@ -43,6 +43,66 @@ internal static class NzConnectionHelpers
         return Encoding.ASCII.GetString(data, offset, length);
     }
 
+    /// <summary>
+    /// Decodes a Netezza VARBINARY text cell (`X'&lt;hex&gt;'`) into bytes.
+    /// "\\x&lt;hex&gt;" is accepted too; anything else is kept verbatim.
+    /// </summary>
+    internal static byte[] VarbinaryInTyped(byte[] data, int offset, int length)
+    {
+        if (length < 0 || offset < 0 || offset + length > data.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(length));
+        }
+
+        ReadOnlySpan<byte> raw = new ReadOnlySpan<byte>(data, offset, length);
+        int start = 0;
+        int end = raw.Length;
+        while (start < end && raw[start] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n') start++;
+        while (end > start && raw[end - 1] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n') end--;
+        ReadOnlySpan<byte> text = raw.Slice(start, end - start);
+
+        ReadOnlySpan<byte> hex = default;
+        bool isHex = false;
+        if (text.Length >= 3 && (text[0] == (byte)'X' || text[0] == (byte)'x') && text[1] == (byte)'\'' && text[^1] == (byte)'\'')
+        {
+            hex = text.Slice(2, text.Length - 3);
+            isHex = true;
+        }
+        else if (text.Length >= 2 && text[0] == (byte)'\\' && (text[1] == (byte)'x' || text[1] == (byte)'X'))
+        {
+            hex = text.Slice(2);
+            isHex = true;
+        }
+
+        if (isHex)
+        {
+            return HexToBytes(hex) ?? raw.ToArray();
+        }
+        return raw.ToArray();
+    }
+
+    private static byte[]? HexToBytes(ReadOnlySpan<byte> hex)
+    {
+        if ((hex.Length & 1) != 0) return null;
+        var result = new byte[hex.Length / 2];
+        for (int i = 0; i < result.Length; i++)
+        {
+            int hi = HexValue(hex[i * 2]);
+            int lo = HexValue(hex[i * 2 + 1]);
+            if (hi < 0 || lo < 0) return null;
+            result[i] = (byte)((hi << 4) | lo);
+        }
+        return result;
+    }
+
+    private static int HexValue(byte value) => value switch
+    {
+        >= (byte)'0' and <= (byte)'9' => value - '0',
+        >= (byte)'a' and <= (byte)'f' => value - 'a' + 10,
+        >= (byte)'A' and <= (byte)'F' => value - 'A' + 10,
+        _ => -1,
+    };
+
     internal static bool BoolRecvTyped(byte[] data, int offset, int length)
     {
         return data[offset] == 116; // ASCII for 't'= (byte)'t', (byte)'f' = 102

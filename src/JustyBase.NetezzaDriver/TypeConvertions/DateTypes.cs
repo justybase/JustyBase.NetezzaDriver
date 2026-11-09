@@ -150,12 +150,11 @@ internal static class DateTypes
         int minute = int.Parse(data.AsSpan().Slice(offset + 3, 2));
         decimal seconds = decimal.Parse(data.AsSpan().Slice(offset + 6, length - 6), _invariantCulture);
 
-        return new TimeSpan(
-            0,
-            hour,
-            minute,
-            (int)seconds,
-            (int)((seconds - Math.Floor(seconds)) * 1000000));
+        // TimeSpan's (days, hours, minutes, seconds, milliseconds) constructor
+        // takes milliseconds, not microseconds. The previous code passed the
+        // fractional microseconds and produced a value 1000x too large.
+        long totalMicroseconds = (long)decimal.Round(seconds * 1_000_000m, MidpointRounding.AwayFromZero);
+        return new TimeSpan(0, hour, minute, 0) + TimeSpan.FromMicroseconds(totalMicroseconds);
     }
 
     private const double EPOCH_SECONDS = 946684800.0; // 2000-01-01 UTC

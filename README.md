@@ -274,6 +274,28 @@ For server failures, `NetezzaException.Message` contains the primary backend mes
 
 The runnable [examples project](src/examples/JustyBase.NetezzaDriver.Examples) includes mapped streaming in its async example and server diagnostic fields in its error-handling example.
 
+## Cross-driver conformance tests
+
+The shared corpus lives in `conformance/` at the workspace root and will move
+to `tests/conformance` as a submodule. It provisions its own `CONFORMANCE`
+schema on a live appliance and runs the same case corpus against all four
+drivers.
+
+```powershell
+..\conformance\run-all.ps1 -Profile smoke -Bootstrap
+```
+
+This driver is executed by `tools/JustyBase.NetezzaDriver.Conformance`:
+
+```powershell
+dotnet build tools\JustyBase.NetezzaDriver.Conformance\JustyBase.NetezzaDriver.Conformance.csproj `
+  -c Release -p:TargetFrameworks=net10.0
+```
+
+The report contains the case matrix, known divergences and JUnit XML. Host and
+credentials come only from `NZ_DEV_HOST` and the other `NZ_DEV_*` variables;
+there is no hard-coded lab address or password.
+
 ## Testing
 
 ```bash

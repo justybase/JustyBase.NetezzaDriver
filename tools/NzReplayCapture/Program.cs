@@ -10,7 +10,7 @@ using JustyBase.NetezzaDriver.TestSupport;
 //   NZ_DEV_HOST=... NZ_DEV_USER=... NZ_DEV_PASSWORD=... NZ_DEV_DB=... \
 //     dotnet run -c Release --project tools/NzReplayCapture -- [outputDir]
 
-string host = Environment.GetEnvironmentVariable("NZ_DEV_HOST") ?? "192.168.0.144";
+string host = Environment.GetEnvironmentVariable("NZ_DEV_HOST") ?? "127.0.0.1";
 int port = int.TryParse(Environment.GetEnvironmentVariable("NZ_DEV_PORT"), out var p) ? p : 5480;
 string database = Environment.GetEnvironmentVariable("NZ_DEV_DB") ?? "JUST_DATA";
 string user = Environment.GetEnvironmentVariable("NZ_DEV_USER") ?? "admin";

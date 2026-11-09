@@ -824,7 +824,7 @@ internal static class ScenarioRunner
                 ?? args.FirstOrDefault(argument => !argument.StartsWith("--", StringComparison.Ordinal))
                 ?? "matrix";
 
-            string host = Environment.GetEnvironmentVariable("NZ_DEV_HOST") ?? "192.168.0.144";
+            string host = Environment.GetEnvironmentVariable("NZ_DEV_HOST") ?? "127.0.0.1";
             int port = GetInt(args, "port", "NZ_DEV_PORT", 5480);
             string database = Environment.GetEnvironmentVariable("NZ_DEV_DB")
                 ?? Environment.GetEnvironmentVariable("NZ_DEV_DATABASE")
