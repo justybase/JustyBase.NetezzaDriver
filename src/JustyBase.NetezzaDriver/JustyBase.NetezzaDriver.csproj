@@ -6,14 +6,14 @@
 	<IsAotCompatible>true</IsAotCompatible>
 	<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 	<Title>ADO.NET driver for IBM Netezza</Title>
-	<Version>1.11.0</Version>
+	<Version>1.11.1</Version>
 	<Description>Pure managed ADO.NET driver for IBM Netezza Performance Server (NPS): synchronous and asynchronous queries, streaming, connection pooling, TLS, catalog metadata, timeouts and structured server diagnostics. No ODBC bridge or native client required.</Description>
 	<PackageProjectUrl>https://github.com/justybase/JustyBase.NetezzaDriver</PackageProjectUrl>
 	<PackageReadmeFile>README.md</PackageReadmeFile>
 	<RepositoryUrl>https://github.com/justybase/JustyBase.NetezzaDriver</RepositoryUrl>
 	<Authors>Krzysztof Duśko</Authors>
 	<PackageTags>netezza;nps;ado.net;database;sql;driver;dotnet</PackageTags>
-	<PackageReleaseNotes>1.11.0: cross-driver conformance runner and replay fixtures; hardened timeout and type handling; CI and documentation improvements.</PackageReleaseNotes>
+	<PackageReleaseNotes>1.11.1: replace the prerelease Microsoft.Extensions.Logging.Abstractions dependency for net11.0 with stable 11.0.0; refresh net9.0 and net10.0 servicing dependencies. Includes 1.11.0 changes: cross-driver conformance runner and replay fixtures; hardened timeout and type handling; CI and documentation improvements.</PackageReleaseNotes>
 	<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
 	 <!--<PackageLicenseFile>LICENSE</PackageLicenseFile>-->
 	<PackageRequireLicenseAcceptance>True</PackageRequireLicenseAcceptance>
@@ -43,17 +43,17 @@
 
 	<!-- For .NET 9 -->
 	<ItemGroup Condition="'$(TargetFramework)' == 'net9.0'">
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.7" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.23" />
 	</ItemGroup>
 
 	<!-- For .NET 10 -->
 	<ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.15" />
 	</ItemGroup>
 
-	<!-- For .NET 11 (RC; pin exact preview, move to stable at GA) -->
+	<!-- For .NET 11 -->
 	<ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="11.0.0-rc.2.26504.105" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="11.0.0" />
 	</ItemGroup>
 
 </Project>

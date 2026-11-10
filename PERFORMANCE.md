@@ -929,6 +929,8 @@ Teardown wyrywał socket spod trwającego draina/kwerendy: `_readBuffer == null`
 - `JustyBase.NetezzaDriver`: `TargetFrameworks` = `net8.0;net9.0;net10.0;net11.0`,
   `Microsoft.Extensions.Logging.Abstractions` `11.0.0-rc.2.26504.105` for `net11.0`
   (RC pin; move to stable at .NET 11 GA).
+  → Since 1.11.1 this is stable `11.0.0`; the .NET 11 SDK prunes the reference, so
+  the `net11.0` dependency group is empty in the published nuspec.
 - `TestSupport`, `Tests`, `Benchmarks`: `net10.0;net11.0` (benchmarks need the
   net11.0 host to compare runtimes).
 - `BenchmarkDotNet` `0.15.8` -> `0.16.0-preview.2` (benchmarks project only):
