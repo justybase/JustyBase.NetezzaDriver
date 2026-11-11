@@ -31,6 +31,12 @@ Directory.CreateDirectory(outputDir);
 [
     ("dimdate", "SELECT * FROM JUST_DATA.ADMIN.DIMDATE"),
     ("fact200k", "SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY ORDER BY ROWID LIMIT 200000"),
+    (
+        "events50k",
+        "SELECT T1.EVENT_ID, T1.CUSTOMER_ID, T1.EVENT_TS, T1.AMOUNT, T1.TAX, " +
+        "T1.QUANTITY, T1.STATUS, T1.SKU, T1.NOTE " +
+        "FROM JUST_DATA.PERF.EVENTS_400K T1 ORDER BY ROWID LIMIT 50000"
+    ),
 ];
 
 Console.WriteLine($"Recording {scenarios.Length} scenario(s) to {outputDir}");

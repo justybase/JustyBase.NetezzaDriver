@@ -3046,7 +3046,18 @@ public sealed class NzConnection : DbConnection
             _tupdesc.FieldSizeArr[ix] = IUnpack(data, dataIdx + 4);
             _tupdesc.FieldTrueSizeArr[ix] = IUnpack(data, dataIdx + 8);
             _tupdesc.FieldOffsetArr[ix] = IUnpack(data, dataIdx + 12);
-            _tupdesc.FieldPhysFieldArr[ix] = IUnpack(data, dataIdx + 16);
+            int physField = IUnpack(data, dataIdx + 16);
+            _tupdesc.FieldPhysFieldArr[ix] = physField;
+            // Precompute the null-bitmap address for the row loop. A corrupt
+            // (negative) physical field number wraps to a large index and is
+            // rejected by the payload bounds check when the bit is read; the
+            // access stays memory-safe.
+            DbosTupleDesc.ComputeNullTest(
+                physField,
+                out int nullByteIndex,
+                out byte nullBitMask);
+            _tupdesc.FieldNullByteIndexArr[ix] = nullByteIndex;
+            _tupdesc.FieldNullBitMaskArr[ix] = nullBitMask;
             _tupdesc.FieldLogFieldArr[ix] = IUnpack(data, dataIdx + 20);
             _tupdesc.FieldNullAllowedArr[ix] = IUnpack(data, dataIdx + 24) != 0;
             _tupdesc.FieldFixedSizeArr[ix] = IUnpack(data, dataIdx + 28);
@@ -3619,30 +3630,7 @@ public sealed class NzConnection : DbConnection
 
                 case NzTypeNumeric:
                 {
-                    int prec = CTableIFieldPrecision(curField);
-                    int scale = CTableIFieldScale(curField);
-                    int count = CTableIFieldNumericDigit32Count(curField);
-                    decimal value;
-                    try
-                    {
-                        value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
-                    }
-                    catch (OverflowException)
-                    {
-                        // System.Decimal tops out at ~7.9e28. Wider NUMERIC values
-                        // (up to NUMERIC(38)) stay exact as text.
-                        rowValue.typeCode = TypeCodeEx.String;
-                        rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
-                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, rowValue.stringValue);
-                        break;
-                    }
-                    catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException or InvalidCastException)
-                    {
-                        throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
-                    }
-                    rowValue.typeCode = TypeCodeEx.Decimal;
-                    rowValue.decimalValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, value);
+                    DecodeNumericField(fieldDataP, curField, ref rowValue, logDebug);
                     break;
                 }
 
@@ -3661,6 +3649,42 @@ public sealed class NzConnection : DbConnection
         }
 
         nzCommand.AddRow(_row);
+    }
+
+    /// <summary>
+    /// Decodes one NUMERIC column. Kept out of the row loops on purpose: the
+    /// overflow fallback needs a try/catch, and an EH region inside the
+    /// per-field loop prevents the JIT from keeping the loop state in
+    /// registers. The rare exception paths stay in this helper.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DecodeNumericField(ReadOnlySpan<byte> fieldDataP, int curField, ref RowValue rowValue, bool logDebug)
+    {
+        int prec = CTableIFieldPrecision(curField);
+        int scale = CTableIFieldScale(curField);
+        int count = CTableIFieldNumericDigit32Count(curField);
+        decimal value;
+        try
+        {
+            value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
+        }
+        catch (OverflowException)
+        {
+            // System.Decimal tops out at ~7.9e28. Wider NUMERIC values
+            // (up to NUMERIC(38)) stay exact as text.
+            rowValue.typeCode = TypeCodeEx.String;
+            rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
+            if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, rowValue.stringValue);
+            return;
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException or InvalidCastException)
+        {
+            throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
+        }
+
+        rowValue.typeCode = TypeCodeEx.Decimal;
+        rowValue.decimalValue = value;
+        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, value);
     }
 
     /// <summary>
@@ -3850,30 +3874,7 @@ public sealed class NzConnection : DbConnection
 
             case NzTypeNumeric:
             {
-                int prec = CTableIFieldPrecision(curField);
-                int scale = CTableIFieldScale(curField);
-                int count = CTableIFieldNumericDigit32Count(curField);
-                decimal value;
-                try
-                {
-                    value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
-                }
-                catch (OverflowException)
-                {
-                    // System.Decimal tops out at ~7.9e28. Wider NUMERIC values
-                    // (up to NUMERIC(38)) stay exact as text.
-                    rowValue.typeCode = TypeCodeEx.String;
-                    rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, rowValue.stringValue);
-                    break;
-                }
-                catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException or InvalidCastException)
-                {
-                    throw new InvalidCastException($"Failed to convert column {curField + 1} as NUMERIC.", ex);
-                }
-                rowValue.typeCode = TypeCodeEx.Decimal;
-                rowValue.decimalValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, value);
+                DecodeNumericField(fieldDataP, curField, ref rowValue, logDebug);
                 break;
             }
 
@@ -4080,14 +4081,15 @@ public sealed class NzConnection : DbConnection
     private bool ColumnIsNull(ReadOnlySpan<byte> data, int fieldLf)
     {
         // When the descriptor says nulls are impossible, skip the bitmap read.
-        if (_tupdesc.NullsAllowed == 0)
+        var tupdesc = _tupdesc;
+        if (tupdesc.NullsAllowed == 0)
             return false;
 
-        var decodedColumnNumber = _tupdesc.FieldPhysFieldArr[fieldLf];
-        byte numberToTest = data[2 + decodedColumnNumber / 8];
-        var numberOfBitToCheck = decodedColumnNumber % 8;
-        var columnIsNull = (numberToTest & (1 << numberOfBitToCheck)) != 0;
-        return _tupdesc.NullsAllowed != 0 && columnIsNull;
+        // The byte offset and bit mask are precomputed when the descriptor is
+        // parsed (see ResGetDbosColumnDescriptions): no per-field div/mod here.
+        byte mask = tupdesc.FieldNullBitMaskArr[fieldLf];
+        int byteIndex = tupdesc.FieldNullByteIndexArr[fieldLf];
+        return (data[2 + byteIndex] & mask) != 0;
     }
 
     private int CTableIFieldPrecision(int coldex)

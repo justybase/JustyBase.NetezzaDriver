@@ -32,6 +32,80 @@ public sealed class NzReplayTests
     }
 
     [Fact]
+    public async Task Replay_Fact200k_ReusesRepeatedStrings()
+    {
+        var fixture = NzReplayFixture.LoadShipped("fact200k.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        using var connection = OpenConnection(server.Port);
+
+        using var command = connection.CreateCommand(fixture.Query);
+        using var reader = command.ExecuteReader();
+
+        var seen = new Dictionary<int, Dictionary<string, string>>();
+        int shared = 0;
+        while (reader.Read())
+        {
+            for (int column = 0; column < reader.FieldCount; column++)
+            {
+                if (reader.GetFieldType(column) != typeof(string))
+                {
+                    continue;
+                }
+                if (!seen.TryGetValue(column, out var values))
+                {
+                    values = new Dictionary<string, string>(StringComparer.Ordinal);
+                    seen[column] = values;
+                }
+                string value = reader.GetString(column);
+                if (values.TryGetValue(value, out var previous))
+                {
+                    Assert.Same(previous, value);
+                    shared++;
+                }
+                else
+                {
+                    values[value] = value;
+                }
+            }
+        }
+
+        Assert.True(shared > 0, "fact200k should contain repeated string values");
+    }
+
+    [Fact]
+    public async Task Replay_Events50k_SharesRepeatedStatusValues()
+    {
+        var fixture = NzReplayFixture.LoadShipped("events50k.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        using var connection = OpenConnection(server.Port);
+
+        using var command = connection.CreateCommand(fixture.Query);
+        using var reader = command.ExecuteReader();
+
+        var status = new Dictionary<string, string>(StringComparer.Ordinal);
+        int shared = 0;
+        int rows = 0;
+        while (reader.Read())
+        {
+            rows++;
+            string value = reader.GetString(6);
+            if (status.TryGetValue(value, out var previous))
+            {
+                Assert.Same(previous, value);
+                shared++;
+            }
+            else
+            {
+                status[value] = value;
+            }
+        }
+
+        Assert.Equal(fixture.ExpectedRows, rows);
+        Assert.True(status.Count > 1, "STATUS should have multiple distinct values");
+        Assert.True(shared > 40_000, "EVENTS_50K should repeat STATUS strings");
+    }
+
+    [Fact]
     public async Task Replay_RepeatedQueries_OnSingleConnection_StayInSync()
     {
         var fixture = NzReplayFixture.LoadShipped("dimdate.nzreplay.gz");

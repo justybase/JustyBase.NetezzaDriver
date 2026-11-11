@@ -160,3 +160,38 @@ end-to-end query time, which stays dominated by the backend (see
 `LiveReaderBench` above).
 
 
+
+### Live EVENTS_400K benchmark (2026-11-10)
+
+`LiveEvents400kBench` reads `JUST_DATA.PERF.EVENTS_400K` (400,000 rows, 9
+columns: BIGINT, INTEGER, TIMESTAMPTZ, NUMERIC(12,2), NUMERIC(12,4), SMALLINT,
+three VARCHARs). Unlike `fact200k.nzreplay.gz`, its SKU/NOTE columns are
+high-cardinality, so it exercises the string-pool cap and realistic mixed
+decode. It needs a live Netezza instance (`NZ_DEV_HOST`, `NZ_DEV_PORT`,
+`NZ_DEV_DB`, `NZ_DEV_USER`, `NZ_DEV_PASSWORD`).
+
+```bash
+dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net11.0 -- \
+  --filter '*LiveEvents400kBench*'
+```
+
+Current build, live localhost, .NET 11 JIT, `ShortRun` + `MemoryDiagnoser`:
+
+| Method | Mean | Allocated |
+|--------|-----:|----------:|
+| `Sync_GetValue` | 297.7 ms | 104.07 MB |
+| `Sync_FullDecode_NoGetValue` | 294.5 ms | 43.04 MB |
+| `Sync_Typed` | 292.7 ms | 43.04 MB |
+
+The wall time is dominated by the backend/transfer, so do not compare separate
+BDN runs to judge a driver change. Interleaved A/B runs of the same scan
+(baseline driver DLL vs change, alternating order) measured the client-side
+effect of the 2026-11-10 pass:
+
+| Access pattern | Baseline CPU/scan | After CPU/scan | Change |
+|----------------|------------------:|---------------:|-------:|
+| typed getters | 139.3 ms | 108.1 ms | -22.4% |
+| `GetValue` all | 151.8 ms | 125.0 ms | -17.6% |
+
+See `PERFORMANCE.md` for the replay numbers and the individual changes
+(numeric decode helper, string-pool cap/last hit, precomputed null bitmap).

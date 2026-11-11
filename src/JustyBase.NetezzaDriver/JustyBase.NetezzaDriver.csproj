@@ -6,14 +6,14 @@
 	<IsAotCompatible>true</IsAotCompatible>
 	<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 	<Title>ADO.NET driver for IBM Netezza</Title>
-	<Version>1.11.1</Version>
+	<Version>1.11.2</Version>
 	<Description>Pure managed ADO.NET driver for IBM Netezza Performance Server (NPS): synchronous and asynchronous queries, streaming, connection pooling, TLS, catalog metadata, timeouts and structured server diagnostics. No ODBC bridge or native client required.</Description>
 	<PackageProjectUrl>https://github.com/justybase/JustyBase.NetezzaDriver</PackageProjectUrl>
 	<PackageReadmeFile>README.md</PackageReadmeFile>
 	<RepositoryUrl>https://github.com/justybase/JustyBase.NetezzaDriver</RepositoryUrl>
 	<Authors>Krzysztof Duśko</Authors>
 	<PackageTags>netezza;nps;ado.net;database;sql;driver;dotnet</PackageTags>
-	<PackageReleaseNotes>1.11.1: replace the prerelease Microsoft.Extensions.Logging.Abstractions dependency for net11.0 with stable 11.0.0; refresh net9.0 and net10.0 servicing dependencies. Includes 1.11.0 changes: cross-driver conformance runner and replay fixtures; hardened timeout and type handling; CI and documentation improvements.</PackageReleaseNotes>
+	<PackageReleaseNotes>1.11.2: faster DBOS result decoding (NUMERIC decode moved out of the row loops, string-pool cap check before hashing, byte-level last-hit cache, precomputed null-bitmap location); replay and live tests pin repeated-string reuse; new PERF.EVENTS_400K benchmark. No public API changes.</PackageReleaseNotes>
 	<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
 	 <!--<PackageLicenseFile>LICENSE</PackageLicenseFile>-->
 	<PackageRequireLicenseAcceptance>True</PackageRequireLicenseAcceptance>

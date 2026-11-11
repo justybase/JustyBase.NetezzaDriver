@@ -974,3 +974,214 @@ read the 89->32 ms delta as a 2.7x runtime effect.
   0.16 when released).
 
 ## STOP — DO NOT TOUCH WITHOUT PROFILING.
+
+---
+
+# Live-data string/numeric decode pass (2026-11-10)
+
+Motivation: the existing `fact200k` replay fixture has low-cardinality strings
+(UNITSIN/OUT/BALANCE repeat in runs), so it overstates string-pool benefits and
+never reaches the pool cap. This pass was profiled and confirmed on the live
+`JUST_DATA.PERF.EVENTS_400K` table (400,000 rows x 9 columns: BIGINT, INTEGER,
+TIMESTAMPTZ, NUMERIC(12,2), NUMERIC(12,4), SMALLINT, VARCHAR(9),
+VARCHAR(12), VARCHAR(40)); SKU and NOTE are high-cardinality.
+
+Environment: Windows 11, AMD Ryzen 7 7840HS, .NET 11.0.0 JIT, loopback Netezza
+on localhost. BenchmarkDotNet 0.16.0-preview.2 `ShortRunJob` + `MemoryDiagnoser`
+for absolute numbers; per-change decisions used an interleaved A/B harness that
+swaps the pre-built driver DLL between runs (same process shape, alternating
+order, medians of 3-4 rounds). That avoids BDN build/runtime drift between
+baseline and change.
+
+Profiling method: `dotnet-trace` sample profiler on the replay workloads,
+inclusive/exclusive `topN`, plus temporary counters for `Stream.Read` calls and
+destructive variants that skip one decode step at a time to attribute cost.
+Main-thread split before the pass (fact200k replay): `ParseDbosTupleData`
+~38-47%, socket reads ~23-27%. On EVENTS_400K the 40.9 MB response costs
+~20.6 ms in the drain path (framing only), so decode above that floor was the
+target.
+
+## Findings that drove the changes
+
+- **NUMERIC decode was the single largest per-row cost on fact200k.** Replacing
+  the value with `0m` (keeping the surrounding loop) dropped full decode from
+  ~29.5 ms to ~20.0 ms. The decimal conversion itself is ~15 ns; the rest was
+  the `try/catch` around it creating an EH region inside the per-field loop,
+  which forces loop state out of registers and blocks caller optimizations.
+- **The string pool kept hashing after its cap.** `Sylvan.GetString` checked
+  `count >= MaxEntries` only *after* computing the hash and walking bucket
+  chains. On EVENTS_400K's SKU column (400k mostly-unique values, cap reached
+  at 4096) that was pure per-value overhead; moving the check before the hash
+  cut EVENTS decode by ~23%.
+- Repeated values were transcoded from bytes to UTF-16 and hashed before the
+  existing char-level last-hit cache could answer. A byte-level last-hit check
+  removes that work for runs of equal values (dimdate, status flags).
+- The row null bitmap divided/modulo'd the physical field number for every
+  column and re-tested `NullsAllowed` twice. The byte offset and mask are now
+  precomputed once per result set.
+- EVENTS_400K `Sync_GetValue` allocates 104 MB/op (3.6M boxed values); the
+  client CPU win does not change allocations. End-to-end wall time on the live
+  server stays ~293-298 ms because backend transfer/execution dominates.
+
+## P1. NUMERIC decode moved out of the row loops
+
+### Before
+
+`ParseDbosTupleData` and `DecodeField` contained the whole NUMERIC case,
+including `try { Numeric.GetCsNumeric(...) } catch (OverflowException) ...`
+inside the per-field loop.
+
+### After
+
+`DecodeNumericField` (`[MethodImpl(MethodImplOptions.NoInlining)]`) owns the
+conversion and both catch clauses; the switch case is one call. Same behavior:
+overflow falls back to exact text, other conversion exceptions are wrapped in
+`InvalidCastException`, debug logging unchanged. The lazy decoder uses the same
+helper.
+
+### Change (interleaved A/B, replay)
+
+- fact200k full decode: `28.6 ms -> 19.8 ms` (~`-31%`).
+- EVENTS_400K full decode: `96.9 ms -> 89.6 ms` (`-7.6%`) on top of the other
+  accepted changes; the effect is larger on schemas with more NUMERIC columns.
+
+### Decision
+
+**ACCEPTED.**
+
+## P2. String pool: cap before hash + byte-level last hit
+
+### Before
+
+- `count >= MaxEntries` was checked after hash/bucket walk, so capped,
+  high-cardinality columns paid hash + `SequenceEqual` probing for every value
+  and then allocated anyway.
+- `GetString(ReadOnlySpan<byte>, Encoding)` always called
+  `encoding.GetMaxCharCount`, `GetChars` and the char-level hash before the
+  last-hit cache could return.
+
+### After
+
+- The cap check runs immediately after the cheap char-level last-hit check and
+  before hashing. Above the cap values are allocated, not interned (documented
+  trade-off); equality and the returned text are unchanged.
+- The byte overload caches the encoded bytes of the current last hit (plus the
+  encoding identity) and returns the interned string on a byte-exact match
+  without transcoding or hashing. It only tracks values that were actually
+  interned, so a unique column pays no extra copy.
+
+### Change (interleaved A/B, replay)
+
+- Byte last hit alone: dimdate `1.22 -> 1.13 ms` (`-7%`), fact200k
+  `29.5 -> 28.7 ms` (`-2.6%`); EVENTS_400K changes little (unique SKUs).
+- Cap-before-hash on EVENTS_400K: decode `97.4 -> 75.0 ms` (`-23%`),
+  `GetValue` `117.7 -> 92.6 ms` (`-21%`).
+- Low-cardinality fixtures: no regression (dimdate/fact200k improved).
+
+### Decision
+
+**ACCEPTED.** The cap behavior is covered by `StringPoolTests`
+(interned below cap, correct-but-not-interned above cap; encoding isolation for
+the byte cache).
+
+## P3. Precomputed null-bitmap location
+
+### Before
+
+Per field: signed `/ 8` and `% 8` plus a second `NullsAllowed` nullable check.
+
+### After
+
+`DbosTupleDesc.ComputeNullTest` maps the physical field number to a byte offset
+and mask once while parsing the descriptor; `ColumnIsNull` is two array reads
+and a byte test. Corrupt/negative field numbers still fail the payload bounds
+check (no unsafe access).
+
+### Change (interleaved A/B, same code except this change)
+
+- EVENTS_400K decode: `78.6 -> 77.9 ms` (`-1.7%`), fact200k decode
+  `20.8 -> 20.1 ms` (`-3.6%`); every A/B round favored the precomputed version.
+
+### Decision
+
+**ACCEPTED.**
+
+## P4. Value reuse verification (test-only)
+
+### Finding
+
+String deduplication already happens per column inside `Sylvan`: below its
+entry cap, repeated wire bytes return the interned `string` instance, and the
+byte-level last-hit check answers runs of equal values without transcoding.
+`DateTime` and `decimal` are value types, so repeated DATE/TIMESTAMP/NUMERIC
+cells are copied, not shared, and there is no allocation to remove.
+
+The missing piece was a regression guard at the reader level.
+
+### After
+
+`NzReplayTests.Replay_Fact200k_ReusesRepeatedStrings` replays the shared
+`fact200k.nzreplay.gz` capture and asserts `Assert.Same` for repeated strings
+in every string column, so a future change cannot silently disable the pool or
+allocate per row. `Replay_Events50k_SharesRepeatedStatusValues` does the same
+for the recorded `PERF.EVENTS_400K` projection, and `ValueCacheLiveTests`
+checks the live `PERF.EVENTS_400K` STATUS column plus every row of
+`ADMIN.FACTPRODUCTINVENTORY`.
+
+### Decision
+
+**ACCEPTED (test-only).** No driver behavior changed.
+
+## Combined result and live confirmation
+
+Byte-exact replay of the live EVENTS_400K response (40.9 MB, 400k x 9), so the
+same data distribution with no server noise. Medians of interleaved rounds,
+baseline vs final:
+
+| Scenario | Baseline | Final | Change |
+|---|---:|---:|---:|
+| EVENTS_400K full decode | 102.7 ms | 77.1 ms | **-25.0%** |
+| EVENTS_400K GetValue all cols | 124.3 ms | 100.1 ms | **-19.5%** |
+| fact200k full decode | 27.4 ms | 19.2 ms | **-30.0%** |
+| dimdate full decode | 1.15 ms | 1.00 ms | **-13.1%** |
+
+Live `JUST_DATA.PERF.EVENTS_400K` on localhost, same A/B method, 20 scans per
+round, process CPU per scan (client cost; wall time is server-bound):
+
+| Access pattern | Baseline CPU/op | Final CPU/op | Change | Wall time |
+|---|---:|---:|---:|---:|
+| typed getters | 139.3 ms | 108.1 ms | **-22.4%** | ~294 -> ~291 ms |
+| GetValue all cols | 151.8 ms | 125.0 ms | **-17.6%** | ~298 -> ~295 ms |
+
+BDN on the current build (live, ShortRun) for absolute reference:
+
+| Method | Mean | Allocated |
+|---|---:|---:|
+| `Sync_GetValue` | 297.7 ms | 104.07 MB |
+| `Sync_FullDecode_NoGetValue` | 294.5 ms | 43.04 MB |
+| `Sync_Typed` | 292.7 ms | 43.04 MB |
+
+The live wall time is dominated by transfer/backend execution; the driver-side
+win is the ~18-22% CPU reduction, which matters most for parallel readers and
+CPU-constrained hosts.
+
+New benchmark: `LiveEvents400kBench` (`src/JustyBase.NetezzaDriver.Benchmarks`).
+
+```bash
+dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net11.0 -- \
+  --filter '*LiveEvents400kBench*'
+```
+
+## Rejected / not touched
+
+- **Read buffer size / socket buffers.** A 256 KB read buffer moved fact200k
+  decode by ~1 ms (within run noise); explicitly setting 64 KB socket buffers
+  caused long tail stalls on loopback. Kept the existing 64 KB default.
+- **Date/time conversion.** Not large enough on EVENTS_400K to justify a
+  separate change in this pass.
+- **Allocation reduction for `GetValue`.** Boxing 3.6M values is API-inherent;
+  memory per op is unchanged.
+- `NzReadBuffer`, `SequentialAccess`, lazy architecture, parameter rendering,
+  `ValueStringBuilder`, ArrayPool ownership: not changed.
+
+## STOP - DO NOT TOUCH WITHOUT PROFILING.

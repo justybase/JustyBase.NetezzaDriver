@@ -52,6 +52,16 @@ public sealed class Sylvan
     // below stays allocation-per-call by design (see unit test).
     string? _lastHit;
 
+    // Encoded bytes of _lastHitBytesSource. Checking a repeated value at the
+    // byte level avoids transcoding it to UTF-16 and hashing it *before* the
+    // char-level last-hit cache can answer. Rows are grouped, so this is the
+    // common case for date dimensions and low-cardinality flags.
+    const int MaxTrackedBytes = 4 * StringSizeLimit; // any <=32-char UTF-8 value
+    byte[]? _lastHitBytes;
+    int _lastHitBytesLength;
+    string? _lastHitBytesSource;
+    Encoding? _lastHitBytesEncoding;
+
 
     /// <summary>
     /// Creates a new StringPool instance.
@@ -90,6 +100,14 @@ public sealed class Sylvan
             return last;
         }
 
+        // High-cardinality column: stop interning once the pool is full. Check
+        // this before hashing/scanning: after the cap those lookups always miss
+        // and just add per-value cost (common for SKU/note-like columns).
+        if (count >= MaxEntries)
+        {
+            return new string(buffer);
+        }
+
         var entries = this.entries;
         var hashCode = GetHashCode(buffer, 0, length);
 
@@ -118,19 +136,14 @@ public sealed class Sylvan
             }
         }
 
-        int count = this.count;
-        if (count >= MaxEntries)
-        {
-            // High-cardinality column: do not grow the pool without bound.
-            return new string(buffer);
-        }
-        if (count == entries.Length)
+        int currentCount = this.count;
+        if (currentCount == entries.Length)
         {
             entries = Resize();
             bucket = ref GetBucket(hashCode);
         }
-        int index = count;
-        this.count = count + 1;
+        int index = currentCount;
+        this.count = currentCount + 1;
 
         str = new string(buffer);
 
@@ -148,6 +161,16 @@ public sealed class Sylvan
     //[SkipLocalsInit]
     public string GetString(ReadOnlySpan<byte> buffer, Encoding encoding)
     {
+        // Byte-level last-hit: a repeated value needs no transcode and no hash.
+        var byteCached = _lastHitBytesSource;
+        if (byteCached is not null
+            && ReferenceEquals(encoding, _lastHitBytesEncoding)
+            && buffer.Length == _lastHitBytesLength
+            && buffer.SequenceEqual(_lastHitBytes.AsSpan(0, _lastHitBytesLength)))
+        {
+            return byteCached;
+        }
+
         int maxLength = encoding.GetMaxCharCount(buffer.Length);
         if (maxLength > StringSizeLimit)
         {
@@ -156,7 +179,16 @@ public sealed class Sylvan
 
         Span<char> chars = stackalloc char[maxLength];
         int effectiveLength = encoding.GetChars(buffer, chars);
-        return GetString(chars.Slice(0, effectiveLength));
+        string result = GetString(chars.Slice(0, effectiveLength));
+        if (ReferenceEquals(result, _lastHit) && buffer.Length <= MaxTrackedBytes)
+        {
+            var bytes = _lastHitBytes ??= new byte[MaxTrackedBytes];
+            buffer.CopyTo(bytes);
+            _lastHitBytesLength = buffer.Length;
+            _lastHitBytesSource = result;
+            _lastHitBytesEncoding = encoding;
+        }
+        return result;
     }
 
 

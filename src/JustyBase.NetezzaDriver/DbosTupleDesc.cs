@@ -79,6 +79,27 @@ internal sealed class DbosTupleDesc
     internal int[] FieldSpringFieldArr { get; private set; } = [];
 
     /// <summary>
+    /// Precomputed null-bitmap lookup for each field: the byte offset of the
+    /// field's null flag inside the row payload (relative to the bitmap start)
+    /// and the bit mask. Computed once per result set so the per-row loop does
+    /// not divide/modulo the physical field number for every column.
+    /// </summary>
+    internal int[] FieldNullByteIndexArr { get; private set; } = [];
+    internal byte[] FieldNullBitMaskArr { get; private set; } = [];
+
+    /// <summary>
+    /// Maps a physical field number to its null-bitmap byte offset and bit mask.
+    /// The protocol stores one bit per physical field, LSB first, after the
+    /// 2-byte row prefix.
+    /// </summary>
+    internal static void ComputeNullTest(int physField, out int byteIndex, out byte bitMask)
+    {
+        uint bit = (uint)physField;
+        byteIndex = (int)(bit >> 3);
+        bitMask = (byte)(1 << (int)(bit & 7));
+    }
+
+    /// <summary>
     /// Allocates the per-field arrays exactly once, after the field count has
     /// been validated against the descriptor payload size.
     /// </summary>
@@ -98,5 +119,7 @@ internal sealed class DbosTupleDesc
         FieldNullAllowedArr = new bool[fieldCount];
         FieldFixedSizeArr = new int[fieldCount];
         FieldSpringFieldArr = new int[fieldCount];
+        FieldNullByteIndexArr = new int[fieldCount];
+        FieldNullBitMaskArr = new byte[fieldCount];
     }
 }
