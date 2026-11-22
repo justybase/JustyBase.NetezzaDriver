@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using JustyBase.NetezzaDriver;
+using JustyBase.NetezzaDriver.TestSupport;
 
 namespace JustyBase.NetezzaDriver.Conformance;
 
@@ -290,6 +291,9 @@ internal static class Program
                 "pool_reuse" => await ApiPoolReuseAsync(settings, api),
                 "external_roundtrip" => await ApiExternalRoundtripAsync(connection, settings, api),
                 "tls_fail_closed" => await ApiTlsFailClosedAsync(settings),
+                "handshake_tls_refusal" => await ApiHandshakeTlsRefusalAsync(api),
+                "handshake_unsupported_auth" => await ApiHandshakeUnsupportedAuthAsync(api),
+                "handshake_invalid_version" => await ApiHandshakeInvalidVersionAsync(api),
                 _ => throw new InvalidOperationException($"unsupported api operation {operation}"),
             };
             result.Columns = columns;
@@ -467,6 +471,81 @@ internal static class Program
             new List<List<object?>> { new() { "unexpected_tls_success" } }
         );
     }
+
+    private static async Task<(List<ColumnResult> Columns, List<List<object?>> Rows)> ApiHandshakeTlsRefusalAsync(
+        JsonElement api)
+    {
+        await using var server = ScriptedNzServer.Start(async (stream, cancellationToken) =>
+        {
+            await HandshakeWire.NegotiateVersion2AndReadSslRequestAsync(stream, cancellationToken)
+                .ConfigureAwait(false);
+            await HandshakeWire.WriteAsync(stream, cancellationToken, (byte)'N').ConfigureAwait(false);
+            await HandshakeWire.DrainUntilClosedAsync(stream, cancellationToken).ConfigureAwait(false);
+        });
+
+        await using var connection = new NzConnection(
+            "conformance", "conformance", "127.0.0.1", "CONFORMANCE",
+            server.Port, SecurityLevelCode.OnlySecuredSession);
+        await connection.OpenAsync();
+        return UnexpectedSuccess("unexpected_tls_success");
+    }
+
+    private static async Task<(List<ColumnResult> Columns, List<List<object?>> Rows)> ApiHandshakeUnsupportedAuthAsync(
+        JsonElement api)
+    {
+        int authCode = api.TryGetProperty("auth_code", out var codeElement)
+            && codeElement.TryGetInt32(out var parsed)
+            ? parsed
+            : 2;
+
+        await using var server = ScriptedNzServer.Start(async (stream, cancellationToken) =>
+        {
+            await HandshakeWire.CompleteVersion2HandshakeAsync(stream, cancellationToken)
+                .ConfigureAwait(false);
+            await HandshakeWire.WriteAsync(stream, cancellationToken, (byte)'R').ConfigureAwait(false);
+            await HandshakeWire.WriteInt32Async(stream, authCode, cancellationToken).ConfigureAwait(false);
+            await HandshakeWire.FinishAndDrainAsync(stream, cancellationToken, halfClose: false)
+                .ConfigureAwait(false);
+        });
+
+        await using var connection = new NzConnection(
+            "conformance", "conformance", "127.0.0.1", "CONFORMANCE",
+            server.Port, SecurityLevelCode.PreferredUnsecured);
+        await connection.OpenAsync();
+        return UnexpectedSuccess("unexpected_auth_success");
+    }
+
+    private static async Task<(List<ColumnResult> Columns, List<List<object?>> Rows)> ApiHandshakeInvalidVersionAsync(
+        JsonElement api)
+    {
+        byte requestedVersion = api.TryGetProperty("requested_version", out var versionElement)
+            && versionElement.TryGetInt32(out var parsed)
+            ? (byte)parsed
+            : (byte)'6';
+
+        await using var server = ScriptedNzServer.Start(async (stream, cancellationToken) =>
+        {
+            await HandshakeWire.ReadPacketAsync(stream, cancellationToken).ConfigureAwait(false);
+            await HandshakeWire.WriteAsync(
+                stream,
+                cancellationToken,
+                (byte)'M',
+                requestedVersion).ConfigureAwait(false);
+            await HandshakeWire.DrainUntilClosedAsync(stream, cancellationToken).ConfigureAwait(false);
+        });
+
+        await using var connection = new NzConnection(
+            "conformance", "conformance", "127.0.0.1", "CONFORMANCE",
+            server.Port, SecurityLevelCode.PreferredUnsecured);
+        await connection.OpenAsync();
+        return UnexpectedSuccess("unexpected_version_success");
+    }
+
+    private static (List<ColumnResult> Columns, List<List<object?>> Rows) UnexpectedSuccess(string check)
+        => (
+            new List<ColumnResult> { new("check", "VARCHAR", "text") },
+            new List<List<object?>> { new() { check } }
+        );
 
     private static async Task<int> QueryIntAsync(NzConnection connection, string sql)
     {
@@ -815,7 +894,8 @@ internal static class Program
             lowered += " " + inner.Message.ToLowerInvariant();
         }
         string kind;
-        if (lowered.Contains("ssl") || lowered.Contains("tls") || lowered.Contains("certificate") || lowered.Contains("handshake"))
+        if (lowered.Contains("ssl") || lowered.Contains("tls") || lowered.Contains("certificate")
+            || lowered.Contains("handshake") || lowered.Contains("authentication") || lowered.Contains("kerberos"))
             kind = "connection";
         else if (lowered.Contains("timeout")) kind = "timeout";
         else if (lowered.Contains("cancel")) kind = "cancelled";

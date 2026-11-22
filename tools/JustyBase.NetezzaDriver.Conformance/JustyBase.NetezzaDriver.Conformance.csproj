@@ -13,6 +13,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\JustyBase.NetezzaDriver\JustyBase.NetezzaDriver.csproj"
                       SetTargetFramework="TargetFramework=net10.0" />
+    <ProjectReference Include="..\..\src\JustyBase.NetezzaDriver.TestSupport\JustyBase.NetezzaDriver.TestSupport.csproj"
+                      SetTargetFramework="TargetFramework=net10.0" />
   </ItemGroup>
 
 </Project>

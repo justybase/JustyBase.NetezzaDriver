@@ -62,6 +62,11 @@ internal sealed class Handshake
     //const short NPS_CLIENT = 0;
     const short IPS_CLIENT = 1;
 
+    // Defensive bounds: a broken or hostile backend must not be able to keep
+    // the handshake in an unbounded loop.
+    private const int MaxHandshakeNegotiationAttempts = 8;
+    private const int MaxConnectionCompleteMessages = 64;
+
     private readonly Socket _usocket;
     private Stream _stream; // NetworkStream or sslStream
     private readonly string _host = "";
@@ -193,8 +198,6 @@ internal sealed class Handshake
 
     private bool ConnAuthenticate(string password)
     {
-        byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-
         var beresp = _stream.ReadByte();
         _logger?.LogDebug("Got response: {Response}", beresp);
 
@@ -208,80 +211,77 @@ internal sealed class Handshake
         int areq = PGUtil.ReadInt32(_stream);
         _logger?.LogDebug("areq = {Areq}", areq);
 
-        if (areq == AUTH_REQ_OK)
+        switch (areq)
         {
-            _logger?.LogInformation("success");
-            return true;
-        }
+            case AUTH_REQ_OK:
+                _logger?.LogInformation("success");
+                return true;
 
-        if (areq == AUTH_REQ_PASSWORD)
-        {
-            _logger?.LogInformation("Plain password requested");
-            PGUtil.WriteInt32(_stream, (int)(passwordBytes.Length + 1 + 4));
-            _stream.Write(passwordBytes);
-            _stream.WriteByte((byte)0);
-            _stream.Flush();
-        }
-
-        if (areq == AUTH_REQ_MD5)
-        {
-            _logger?.LogInformation("Password type is MD5");
-            byte[] salt = new byte[2];
-            _stream.ReadExactly(salt, 0, 2);
-            _logger?.LogDebug("Salt = {Salt}", Encoding.UTF8.GetString(salt));
-            if (passwordBytes == null)
+            case AUTH_REQ_PASSWORD:
             {
-                throw new InterfaceException("server requesting MD5 password authentication, but no password was provided");
+                _logger?.LogInformation("Plain password requested");
+                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                PGUtil.WriteInt32(_stream, passwordBytes.Length + 1 + 4);
+                _stream.Write(passwordBytes);
+                _stream.WriteByte((byte)0);
+                _stream.Flush();
+                return true;
             }
-            var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
-            var md5pwd = Convert.ToBase64String(md5encoded);
-            var pwd = md5pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("MD5 password response generated");
 
-            var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-            // Int32 - Message length including self.
-            // String - The password.  Password may be encrypted.
-            PGUtil.WriteInt32(_stream, (int)(pwdBytes.Length + 1 + 4));
-            _stream.Write(pwdBytes);
-            _stream.WriteByte((byte)0);
-            _stream.Flush();
-        }
-
-        if (areq == AUTH_REQ_SHA256)
-        {
-            _logger?.LogInformation("Password type is SSH");
-            byte[] salt = new byte[2];
-            _stream.ReadExactly(salt, 0, 2);
-            _logger?.LogDebug("Salt = {Salt}", Encoding.UTF8.GetString(salt));
-            if (passwordBytes == null)
+            case AUTH_REQ_MD5:
             {
-                throw new InterfaceException("server requesting MD5 password authentication, but no password was provided");
+                _logger?.LogInformation("Password type is MD5");
+                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                byte[] salt = new byte[2];
+                _stream.ReadExactly(salt, 0, 2);
+                var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
+                var md5pwd = Convert.ToBase64String(md5encoded);
+                var pwd = md5pwd.TrimEnd('=').ToArray();
+                _logger?.LogDebug("MD5 password response generated");
+
+                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                // Int32 - Message length including self.
+                // String - The password.  Password may be encrypted.
+                PGUtil.WriteInt32(_stream, pwdBytes.Length + 1 + 4);
+                _stream.Write(pwdBytes);
+                _stream.WriteByte((byte)0);
+                _stream.Flush();
+                return true;
             }
-            var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
-            var sha256pwd = Convert.ToBase64String(sha256encoded);
-            var pwd = sha256pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("SHA256 password response generated");
 
-            var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-            // Int32 - Message length including
-            // String - The password.  Password may be encrypted.
-            PGUtil.WriteInt32(_stream, (int)(pwdBytes.Length + 1 + 4));
-            _stream.Write(pwdBytes);
-            _stream.WriteByte((byte)0);
+            case AUTH_REQ_SHA256:
+            {
+                _logger?.LogInformation("Password type is SHA-256");
+                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                byte[] salt = new byte[2];
+                _stream.ReadExactly(salt, 0, 2);
+                var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
+                var sha256pwd = Convert.ToBase64String(sha256encoded);
+                var pwd = sha256pwd.TrimEnd('=').ToArray();
+                _logger?.LogDebug("SHA256 password response generated");
+
+                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                // Int32 - Message length including self.
+                // String - The password.  Password may be encrypted.
+                PGUtil.WriteInt32(_stream, pwdBytes.Length + 1 + 4);
+                _stream.Write(pwdBytes);
+                _stream.WriteByte((byte)0);
+                _stream.Flush();
+                return true;
+            }
+
+            case AUTH_REQ_KRB5:
+                throw new NetezzaException(
+                    "Kerberos authentication was requested by the server, but this driver does not support it.");
+
+            default:
+                throw new NetezzaException(
+                    $"Unsupported authentication method requested by the server (code {areq}).");
         }
-
-        if (areq == AUTH_REQ_KRB5)
-        {
-            _logger?.LogInformation("krb encryption requested from backend");
-        }
-
-        return true;
     }
 
     private async Task<bool> ConnAuthenticateAsync(string password, CancellationToken cancellationToken = default)
     {
-        byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-
         var beresp = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
         _logger?.LogDebug("Got response: {Response}", beresp);
 
@@ -292,66 +292,72 @@ internal sealed class Handshake
         }
 
         _logger?.LogDebug("auth got 'R' - request for password");
-        int areq = await ReadInt32Async( cancellationToken).ConfigureAwait(false);
+        int areq = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
         _logger?.LogDebug("areq = {Areq}", areq);
 
-        if (areq == AUTH_REQ_OK)
+        switch (areq)
         {
-            _logger?.LogInformation("success");
-            return true;
+            case AUTH_REQ_OK:
+                _logger?.LogInformation("success");
+                return true;
+
+            case AUTH_REQ_PASSWORD:
+            {
+                _logger?.LogInformation("Plain password requested");
+                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                await WriteInt32Async(passwordBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                await _stream.WriteAsync(passwordBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
+                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                return true;
+            }
+
+            case AUTH_REQ_MD5:
+            {
+                _logger?.LogInformation("Password type is MD5");
+                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                byte[] salt = new byte[2];
+                await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
+                var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
+                var md5pwd = Convert.ToBase64String(md5encoded);
+                var pwd = md5pwd.TrimEnd('=').ToArray();
+                _logger?.LogDebug("MD5 password response generated");
+
+                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                await WriteInt32Async(pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
+                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                return true;
+            }
+
+            case AUTH_REQ_SHA256:
+            {
+                _logger?.LogInformation("Password type is SHA-256");
+                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                byte[] salt = new byte[2];
+                await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
+                var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
+                var sha256pwd = Convert.ToBase64String(sha256encoded);
+                var pwd = sha256pwd.TrimEnd('=').ToArray();
+                _logger?.LogDebug("SHA256 password response generated");
+
+                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                await WriteInt32Async(pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
+                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                return true;
+            }
+
+            case AUTH_REQ_KRB5:
+                throw new NetezzaException(
+                    "Kerberos authentication was requested by the server, but this driver does not support it.");
+
+            default:
+                throw new NetezzaException(
+                    $"Unsupported authentication method requested by the server (code {areq}).");
         }
-
-        if (areq == AUTH_REQ_PASSWORD)
-        {
-            _logger?.LogInformation("Plain password requested");
-            await WriteInt32Async( passwordBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-            await _stream.WriteAsync(passwordBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-            await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        if (areq == AUTH_REQ_MD5)
-        {
-            _logger?.LogInformation("Password type is MD5");
-            byte[] salt = new byte[2];
-            await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
-            _logger?.LogDebug("Salt = {Salt}", Encoding.UTF8.GetString(salt));
-            var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
-            var md5pwd = Convert.ToBase64String(md5encoded);
-            var pwd = md5pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("MD5 password response generated");
-
-            var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-            await WriteInt32Async( pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-            await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-            await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        if (areq == AUTH_REQ_SHA256)
-        {
-            _logger?.LogInformation("Password type is SSH");
-            byte[] salt = new byte[2];
-            await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
-            _logger?.LogDebug("Salt = {Salt}", Encoding.UTF8.GetString(salt));
-            var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
-            var sha256pwd = Convert.ToBase64String(sha256encoded);
-            var pwd = sha256pwd.TrimEnd('=').ToArray();
-            _logger?.LogDebug("SHA256 password response generated");
-
-            var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-            await WriteInt32Async( pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-            await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-            await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        if (areq == AUTH_REQ_KRB5)
-        {
-            _logger?.LogInformation("krb encryption requested from backend");
-        }
-
-        return true;
     }
 
 
@@ -361,14 +367,8 @@ internal sealed class Handshake
         int version = CP_VERSION_6;
         _logger?.LogDebug("Latest-handshake version (conn-protocol) = {Version}", version);
 
-        while (true)
+        for (int attempt = 1; attempt <= MaxHandshakeNegotiationAttempts; attempt++)
         {
-            if (version == CP_VERSION_6) version = CP_VERSION_6;
-            if (version == CP_VERSION_5) version = CP_VERSION_5;
-            if (version == CP_VERSION_4) version = CP_VERSION_4;
-            if (version == CP_VERSION_3) version = CP_VERSION_3;
-            if (version == CP_VERSION_2) version = CP_VERSION_2;
-
             _logger?.LogDebug("sending version: {Version}", version);
 
             PGUtil.WriteInt32(_stream, 2+2 + 4);
@@ -391,10 +391,25 @@ internal sealed class Handshake
             else if (beresp == (byte)'M')
             {
                 var newVersion = _stream.ReadByte();
-                if (newVersion == (byte)'2') version = CP_VERSION_2;
-                if (newVersion == (byte)'3') version = CP_VERSION_3;
-                if (newVersion == (byte)'4') version = CP_VERSION_4;
-                if (newVersion == (byte)'5') version = CP_VERSION_5;
+                var negotiated = newVersion switch
+                {
+                    (byte)'2' => CP_VERSION_2,
+                    (byte)'3' => CP_VERSION_3,
+                    (byte)'4' => CP_VERSION_4,
+                    (byte)'5' => CP_VERSION_5,
+                    _ => -1,
+                };
+
+                if (negotiated < CP_VERSION_2 || negotiated >= version)
+                {
+                    _logger?.LogWarning(
+                        "Server requested an invalid handshake version {Version}; current version is {Current}",
+                        newVersion,
+                        version);
+                    return false;
+                }
+
+                version = negotiated;
             }
             else if (beresp == (byte)'E')
             {
@@ -407,6 +422,9 @@ internal sealed class Handshake
                 return false;
             }
         }
+
+        _logger?.LogWarning("Handshake negotiation did not converge after {Attempts} attempts", MaxHandshakeNegotiationAttempts);
+        return false;
     }
 
     private async Task<bool> ConnHandshakeNegotiateAsync(CancellationToken cancellationToken = default)
@@ -414,14 +432,8 @@ internal sealed class Handshake
         int version = CP_VERSION_6;
         _logger?.LogDebug("Latest-handshake version (conn-protocol) = {Version}", version);
 
-        while (true)
+        for (int attempt = 1; attempt <= MaxHandshakeNegotiationAttempts; attempt++)
         {
-            if (version == CP_VERSION_6) version = CP_VERSION_6;
-            if (version == CP_VERSION_5) version = CP_VERSION_5;
-            if (version == CP_VERSION_4) version = CP_VERSION_4;
-            if (version == CP_VERSION_3) version = CP_VERSION_3;
-            if (version == CP_VERSION_2) version = CP_VERSION_2;
-
             _logger?.LogDebug("sending version: {Version}", version);
 
             await WriteInt32Async( 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
@@ -443,10 +455,25 @@ internal sealed class Handshake
             else if (beresp == (byte)'M')
             {
                 var newVersion = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
-                if (newVersion == (byte)'2') version = CP_VERSION_2;
-                if (newVersion == (byte)'3') version = CP_VERSION_3;
-                if (newVersion == (byte)'4') version = CP_VERSION_4;
-                if (newVersion == (byte)'5') version = CP_VERSION_5;
+                var negotiated = newVersion switch
+                {
+                    (byte)'2' => CP_VERSION_2,
+                    (byte)'3' => CP_VERSION_3,
+                    (byte)'4' => CP_VERSION_4,
+                    (byte)'5' => CP_VERSION_5,
+                    _ => -1,
+                };
+
+                if (negotiated < CP_VERSION_2 || negotiated >= version)
+                {
+                    _logger?.LogWarning(
+                        "Server requested an invalid handshake version {Version}; current version is {Current}",
+                        newVersion,
+                        version);
+                    return false;
+                }
+
+                version = negotiated;
             }
             else if (beresp == (byte)'E')
             {
@@ -459,6 +486,9 @@ internal sealed class Handshake
                 return false;
             }
         }
+
+        _logger?.LogWarning("Handshake negotiation did not converge after {Attempts} attempts", MaxHandshakeNegotiationAttempts);
+        return false;
     }
 
 
@@ -621,6 +651,7 @@ internal sealed class Handshake
     {
         short information = HSV2_SSL_NEGOTIATE;
         int currSecLevel = (int)securityLevel;
+        bool tlsEstablished = false;
 
         while (information != 0)
         {
@@ -632,78 +663,73 @@ internal sealed class Handshake
 
             PGUtil.WriteInt32(_stream, 2 + 4 + 4);
             PGUtil.WriteInt16(_stream, (short)opcode); //2
-            PGUtil.WriteInt32(_stream, (int)currSecLevel);//4
+            PGUtil.WriteInt32(_stream, currSecLevel);//4
             _stream.Flush();
 
-            if (information == HSV2_SSL_CONNECT)
-            {
-                try
-                {
-                    var sslStream = new SslStream(new NetworkStream(_usocket));
-                    sslStream.AuthenticateAsClient(_usocket!.RemoteEndPoint!.ToString()!);
+            var beresp = _stream.ReadByte();
+            _logger?.LogDebug("Got response = {Response}", beresp);
 
-                    _stream = sslStream;
-                    _logger?.LogInformation("Secured Connect Success");
-                }
-                catch (AuthenticationException)
+            if (beresp == (byte)'S')
+            {
+                // The backend sends 'S' only in 3 cases
+                // Client requests strict SSL and backend supports it.
+                // Client requests preferred SSL and backend supports it.
+                // Client requests preferred non-SSL, but backend supports only secured sessions.
+                if (securityLevel == SecurityLevelCode.OnlyUnsecuredSession)
                 {
-                    _logger?.LogWarning("Problem establishing secured session");
-                    return false;
+                    throw new NetezzaException(
+                        "The server requires a TLS session, but SecurityLevelCode.OnlyUnsecuredSession was requested.");
                 }
+
+                PGUtil.WriteInt32(_stream, 2 + 4);
+                PGUtil.WriteInt16(_stream, (short)HSV2_SSL_CONNECT); // 12
+
+                var sslStream = new SslStream(_stream, false);
+                if (_sslCerFilePath is null)
+                {
+                    throw new NetezzaException("A TLS certificate file is required for a secured session.");
+                }
+
+                var certFromPem = X509Certificate2.CreateFromPem(System.IO.File.ReadAllText(_sslCerFilePath));
+                sslStream.AuthenticateAsClient(new SslClientAuthenticationOptions()
+                {
+                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                    AllowRenegotiation = false,
+                    TargetHost = _host,
+                    ClientCertificates = [(X509Certificate)certFromPem],
+                    EnabledSslProtocols = SslProtocols.Tls12,
+                    RemoteCertificateValidationCallback = UserCertificateValidationCallback,
+                    LocalCertificateSelectionCallback = UserCertificateSelectionCallback
+                });
+                _stream = sslStream;
+                _stream.Flush();
+                tlsEstablished = true;
+                beresp = _stream.ReadByte();
             }
 
-            if (information != 0)
+            if (beresp == (byte)'N')
             {
-                var beresp = _stream.ReadByte();
-                _logger?.LogDebug("Got response = {Response}", beresp);
-
-                if (beresp == (byte)'S')
+                if (!tlsEstablished && securityLevel == SecurityLevelCode.OnlySecuredSession)
                 {
-                    // The backend sends 'S' only in 3 cases
-                    // Client requests strict SSL and backend supports it.
-                    // Client requests preferred SSL and backend supports it.
-                    // Client requests preferred non-SSL, but backend supports only secured sessions.
-
-
-                    PGUtil.WriteInt32(_stream, 2 + 4);
-                    PGUtil.WriteInt16(_stream, (short)HSV2_SSL_CONNECT); // 12
-
-
-                    var sslStream = new SslStream(_stream, false);
-                    if (_sslCerFilePath is null)
-                    {
-                        throw new NetezzaException("_sslCerFilePath hould not be empty");
-                    }
-
-                    var certFromPem = X509Certificate2.CreateFromPem(System.IO.File.ReadAllText(_sslCerFilePath));
-                    sslStream.AuthenticateAsClient(new SslClientAuthenticationOptions()
-                    {
-                        CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                        AllowRenegotiation = false,
-                        TargetHost = _host,
-                        ClientCertificates = [(X509Certificate)certFromPem],
-                        EnabledSslProtocols = SslProtocols.Tls12,
-                        RemoteCertificateValidationCallback = UserCertificateValidationCallback,
-                        LocalCertificateSelectionCallback = UserCertificateSelectionCallback
-                    }); 
-                    _stream = sslStream;
-                    _stream.Flush();
-                    beresp = _stream.ReadByte();
+                    throw new NetezzaException(
+                        "The server refused a TLS session while SecurityLevelCode.OnlySecuredSession was requested.");
                 }
-                if (beresp == (byte)'N')
+
+                if (!tlsEstablished)
                 {
-                    if (information == HSV2_SSL_NEGOTIATE)
-                    {
-                        _logger?.LogDebug("Attempting unsecured session");
-                    }
-                    information = 0;
-                    return true;
+                    _logger?.LogDebug("Attempting unsecured session");
                 }
-                else if (beresp == (byte)'E')
-                {
-                    _logger?.LogWarning("Error: connection failed");
-                    return false;
-                }
+
+                information = 0;
+                return true;
+            }
+            else if (beresp == (byte)'E')
+            {
+                throw new NetezzaException("The server rejected the TLS security negotiation.");
+            }
+            else
+            {
+                throw new NetezzaException($"Unexpected TLS security negotiation response 0x{beresp:X2}.");
             }
         }
 
@@ -714,6 +740,7 @@ internal sealed class Handshake
     {
         short information = HSV2_SSL_NEGOTIATE;
         int currSecLevel = (int)securityLevel;
+        bool tlsEstablished = false;
 
         while (information != 0)
         {
@@ -728,71 +755,66 @@ internal sealed class Handshake
             await WriteInt32Async( currSecLevel, cancellationToken).ConfigureAwait(false);
             await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-            if (information == HSV2_SSL_CONNECT)
-            {
-                try
-                {
-                    var sslStream = new SslStream(new NetworkStream(_usocket));
-                    await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
-                    {
-                        TargetHost = _usocket!.RemoteEndPoint!.ToString()!
-                    }, cancellationToken).ConfigureAwait(false);
+            var beresp = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+            _logger?.LogDebug("Got response = {Response}", beresp);
 
-                    _stream = sslStream;
-                    _logger?.LogInformation("Secured Connect Success");
-                }
-                catch (AuthenticationException)
+            if (beresp == (byte)'S')
+            {
+                if (securityLevel == SecurityLevelCode.OnlyUnsecuredSession)
                 {
-                    _logger?.LogWarning("Problem establishing secured session");
-                    return false;
+                    throw new NetezzaException(
+                        "The server requires a TLS session, but SecurityLevelCode.OnlyUnsecuredSession was requested.");
                 }
+
+                await WriteInt32Async( 2 + 4, cancellationToken).ConfigureAwait(false);
+                await WriteInt16Async( HSV2_SSL_CONNECT, cancellationToken).ConfigureAwait(false);
+
+                var sslStream = new SslStream(_stream, false);
+                if (_sslCerFilePath is null)
+                {
+                    throw new NetezzaException("A TLS certificate file is required for a secured session.");
+                }
+
+                var certFromPem = X509Certificate2.CreateFromPem(System.IO.File.ReadAllText(_sslCerFilePath));
+                await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions()
+                {
+                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                    AllowRenegotiation = false,
+                    TargetHost = _host,
+                    ClientCertificates = [(X509Certificate)certFromPem],
+                    EnabledSslProtocols = SslProtocols.Tls12,
+                    RemoteCertificateValidationCallback = UserCertificateValidationCallback,
+                    LocalCertificateSelectionCallback = UserCertificateSelectionCallback
+                }, cancellationToken).ConfigureAwait(false);
+                _stream = sslStream;
+                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                tlsEstablished = true;
+                beresp = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            if (information != 0)
+            if (beresp == (byte)'N')
             {
-                var beresp = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
-                _logger?.LogDebug("Got response = {Response}", beresp);
-
-                if (beresp == (byte)'S')
+                if (!tlsEstablished && securityLevel == SecurityLevelCode.OnlySecuredSession)
                 {
-                    await WriteInt32Async( 2 + 4, cancellationToken).ConfigureAwait(false);
-                    await WriteInt16Async( HSV2_SSL_CONNECT, cancellationToken).ConfigureAwait(false);
+                    throw new NetezzaException(
+                        "The server refused a TLS session while SecurityLevelCode.OnlySecuredSession was requested.");
+                }
 
-                    var sslStream = new SslStream(_stream, false);
-                    if (_sslCerFilePath is null)
-                    {
-                        throw new NetezzaException("_sslCerFilePath hould not be empty");
-                    }
+                if (!tlsEstablished)
+                {
+                    _logger?.LogDebug("Attempting unsecured session");
+                }
 
-                    var certFromPem = X509Certificate2.CreateFromPem(System.IO.File.ReadAllText(_sslCerFilePath));
-                    await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions()
-                    {
-                        CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                        AllowRenegotiation = false,
-                        TargetHost = _host,
-                        ClientCertificates = [(X509Certificate)certFromPem],
-                        EnabledSslProtocols = SslProtocols.Tls12,
-                        RemoteCertificateValidationCallback = UserCertificateValidationCallback,
-                        LocalCertificateSelectionCallback = UserCertificateSelectionCallback
-                    }, cancellationToken).ConfigureAwait(false);
-                    _stream = sslStream;
-                    await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                    beresp = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
-                }
-                if (beresp == (byte)'N')
-                {
-                    if (information == HSV2_SSL_NEGOTIATE)
-                    {
-                        _logger?.LogDebug("Attempting unsecured session");
-                    }
-                    information = 0;
-                    return true;
-                }
-                else if (beresp == (byte)'E')
-                {
-                    _logger?.LogWarning("Error: connection failed");
-                    return false;
-                }
+                information = 0;
+                return true;
+            }
+            else if (beresp == (byte)'E')
+            {
+                throw new NetezzaException("The server rejected the TLS security negotiation.");
+            }
+            else
+            {
+                throw new NetezzaException($"Unexpected TLS security negotiation response 0x{beresp:X2}.");
             }
         }
 
@@ -1238,10 +1260,21 @@ internal sealed class Handshake
     public BackendKeyDataMessage BackendKeyData { get; set; } = null!;
     private bool ConnConnectionComplete()
     {
-        while (true)
+        for (int messageCount = 1; messageCount <= MaxConnectionCompleteMessages; messageCount++)
         {
             var response = _stream.ReadByte();
             _logger?.LogInformation("backend response: {Response}", response);
+
+            if (response < 0)
+            {
+                throw new NetezzaException("The server closed the connection during the handshake.");
+            }
+
+            if (!IsKnownConnectionCompleteMessage(response))
+            {
+                throw new NetezzaException(
+                    $"Unexpected backend message 0x{response:X2} during the handshake.");
+            }
 
             if (response != (byte)BackendMessageCode.AuthenticationRequest && response != (byte)BackendMessageCode.ErrorResponse)
             {
@@ -1293,14 +1326,28 @@ internal sealed class Handshake
                 //return false;
             }
         }
+
+        throw new NetezzaException(
+            $"The handshake did not reach ReadyForQuery after {MaxConnectionCompleteMessages} messages.");
     }
 
     private async Task<bool> ConnConnectionCompleteAsync(CancellationToken cancellationToken = default)
     {
-        while (true)
+        for (int messageCount = 1; messageCount <= MaxConnectionCompleteMessages; messageCount++)
         {
             var response = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
             _logger?.LogInformation("backend response: {Response}", response);
+
+            if (response < 0)
+            {
+                throw new NetezzaException("The server closed the connection during the handshake.");
+            }
+
+            if (!IsKnownConnectionCompleteMessage(response))
+            {
+                throw new NetezzaException(
+                    $"Unexpected backend message 0x{response:X2} during the handshake.");
+            }
 
             if (response != (byte)BackendMessageCode.AuthenticationRequest && response != (byte)BackendMessageCode.ErrorResponse)
             {
@@ -1355,7 +1402,18 @@ internal sealed class Handshake
                 }
             }
         }
+
+        throw new NetezzaException(
+            $"The handshake did not reach ReadyForQuery after {MaxConnectionCompleteMessages} messages.");
     }
+
+    private static bool IsKnownConnectionCompleteMessage(int response)
+        => response == (byte)BackendMessageCode.AuthenticationRequest
+            || response == (byte)BackendMessageCode.ErrorResponse
+            || response == (byte)BackendMessageCode.NoticeResponse
+            || response == (byte)BackendMessageCode.BackendKeyData
+            || response == (byte)BackendMessageCode.ReadyForQuery
+            || response == (byte)BackendMessageCode.ParameterStatus;
 
 }
 

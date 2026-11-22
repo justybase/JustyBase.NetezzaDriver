@@ -4795,6 +4795,24 @@ public sealed class NzConnection : DbConnection
     }
     public void Open(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, bool useBufferedStream = false, bool setSocketBufferSizes = false)
     {
+        if (_state != ConnectionState.Closed)
+        {
+            throw new InvalidOperationException("The connection is already open.");
+        }
+
+        try
+        {
+            OpenCore(clientVersionId, useBufferedStream, setSocketBufferSizes);
+        }
+        catch
+        {
+            try { Close(); } catch { /* preserve the original failure */ }
+            throw;
+        }
+    }
+
+    private void OpenCore(ClientTypeId clientVersionId, bool useBufferedStream, bool setSocketBufferSizes)
+    {
         Volatile.Write(ref _protocolReadUnavailable, 1);
         if (_tmp_buffer.Length == 0)
         {
@@ -4842,6 +4860,25 @@ public sealed class NzConnection : DbConnection
     }
 
     public async Task OpenAsync(ClientTypeId clientVersionId = ClientTypeId.SqlDotnet, CancellationToken cancellationToken = default, bool useBufferedStream = false, bool setSocketBufferSizes = false)
+    {
+        if (_state != ConnectionState.Closed)
+        {
+            throw new InvalidOperationException("The connection is already open.");
+        }
+
+        try
+        {
+            await OpenCoreAsync(clientVersionId, cancellationToken, useBufferedStream, setSocketBufferSizes)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            try { await CloseAsync().ConfigureAwait(false); } catch { /* preserve the original failure */ }
+            throw;
+        }
+    }
+
+    private async Task OpenCoreAsync(ClientTypeId clientVersionId, CancellationToken cancellationToken, bool useBufferedStream, bool setSocketBufferSizes)
     {
         cancellationToken.ThrowIfCancellationRequested();
         Volatile.Write(ref _protocolReadUnavailable, 1);
