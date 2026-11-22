@@ -61,6 +61,7 @@ public sealed class NzConnection : DbConnection
     private readonly string _password;
     private readonly string _host;
     private readonly int _port;
+    private readonly bool _bulkInsertEnabled = true;
 
     public DateTime CreatedAt { get; internal set; } = DateTime.UtcNow;
 
@@ -127,6 +128,7 @@ public sealed class NzConnection : DbConnection
         _password = parameters.Password;
         _host = parameters.Host;
         _port = parameters.Port ?? 5480;
+        _bulkInsertEnabled = parameters.BulkInsert;
         if (parameters.Timeout.HasValue)
         {
             ConnectionTimeoutDuration = TimeSpan.FromSeconds(parameters.Timeout.Value);
@@ -147,6 +149,7 @@ public sealed class NzConnection : DbConnection
         _password = parameters.Password;
         _host = parameters.Host;
         _port = parameters.Port ?? 5480;
+        _bulkInsertEnabled = parameters.BulkInsert;
         if (parameters.Timeout.HasValue)
         {
             ConnectionTimeoutDuration = TimeSpan.FromSeconds(parameters.Timeout.Value);
@@ -162,7 +165,7 @@ public sealed class NzConnection : DbConnection
     /// <param name="connectionString">Connection string in format "User=value;Password=value" or "User=value;Password={value;with;semicolons}"</param>
     /// <returns>A tuple containing connection parameters</returns>
     /// <exception cref="NetezzaException">Thrown when mandatory parameters are missing or format is invalid</exception>
-    internal static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime, int ConnectionValidationInterval) ParseConnectionString(string connectionString)
+    internal static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime, int ConnectionValidationInterval, bool BulkInsert) ParseConnectionString(string connectionString)
     {
         var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int position = 0;
@@ -269,7 +272,10 @@ public sealed class NzConnection : DbConnection
             && int.TryParse(validationStr, out var parsedValidation))
             connectionValidationInterval = parsedValidation;
 
-        return (user, password, host, database, port, timeout, pooling, minPoolSize, maxPoolSize, connectionIdleTimeout, connectionLifetime, connectionValidationInterval);
+        bool bulkInsert = !parameters.TryGetValue("BulkInsert", out var bulkInsertStr)
+            || bool.Parse(bulkInsertStr);
+
+        return (user, password, host, database, port, timeout, pooling, minPoolSize, maxPoolSize, connectionIdleTimeout, connectionLifetime, connectionValidationInterval, bulkInsert);
     }
 
 
@@ -1237,6 +1243,11 @@ public sealed class NzConnection : DbConnection
         } 
     }
     public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromSeconds(60);
+    /// <summary>
+    /// Gets whether external-table transfers are enabled for <see cref="NzBulkCopy"/>.
+    /// When false, bulk-copy operations use row-by-row INSERT statements.
+    /// </summary>
+    public bool BulkInsertEnabled => _bulkInsertEnabled;
 
     private NzMetadata? _metadata;
     public NzMetadata Meta => _metadata ??= new NzMetadata(this);
@@ -1251,7 +1262,8 @@ public sealed class NzConnection : DbConnection
             Password = _password,
             Port= _port,
             Timeout= (int)ConnectionTimeoutDuration.TotalSeconds,
-            LoggerFactory= _loggerFactory
+            LoggerFactory= _loggerFactory,
+            BulkInsert = _bulkInsertEnabled
         }.ConnectionString;
         set => throw new NotSupportedException("Setting ConnectionString is not supported. Create a new NzConnection instance.");
     }
@@ -1264,7 +1276,8 @@ public sealed class NzConnection : DbConnection
         Password = _password,
         Port = _port,
         Timeout = (int)ConnectionTimeoutDuration.TotalSeconds,
-        LoggerFactory = _loggerFactory
+        LoggerFactory = _loggerFactory,
+        BulkInsert = _bulkInsertEnabled
     }.SafeConnectionString;
 
     public override string Database => _database;
@@ -1584,6 +1597,7 @@ public sealed class NzConnection : DbConnection
     private int _lastResponse = -1;
 
     private FileStream _nextRelatedFileStream = null!;
+    private BulkInsertData? _pendingBulkData;
 
     internal bool NewRowReceived()
     {
@@ -2290,7 +2304,11 @@ public sealed class NzConnection : DbConnection
 
             string filename = Encoding.UTF8.GetString(filenameBuf.ToArray());
             int logType = _readBuffer.ReadInt32BigEndian();
-            if (!GetFileFromBE(logDir, filename, logType))
+            if (_pendingBulkData is not null)
+            {
+                DrainFileTransferPayload();
+            }
+            else if (!GetFileFromBE(logDir, filename, logType))
             {
                 _logger?.LogDebug("Error in writing file received from BE");
             }
@@ -2449,7 +2467,11 @@ public sealed class NzConnection : DbConnection
 
             string filename = Encoding.UTF8.GetString(filenameBuf.ToArray());
             int logType = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
-            if (!await GetFileFromBEAsync(logDir, filename, logType, cancellationToken).ConfigureAwait(false))
+            if (_pendingBulkData is not null)
+            {
+                await DrainFileTransferPayloadAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else if (!await GetFileFromBEAsync(logDir, filename, logType, cancellationToken).ConfigureAwait(false))
             {
                 _logger?.LogDebug("Error in writing file received from BE");
             }
@@ -2510,6 +2532,13 @@ public sealed class NzConnection : DbConnection
         int format = _readBuffer.ReadInt32BigEndian();
         int blockSize = ReadProtocolLength("externalTable.blockSize", allowZero: false);
         _logger?.LogInformation("Format={Format} Block size={BlockSize} Host version={HostVersion}", format, blockSize, hostVersion);
+
+        if (_pendingBulkData is { } bulkData)
+        {
+            bulkData.WriteRows(_stream, blockSize);
+            _logger?.LogInformation("Streamed {RowCount} bulk-insert rows from memory", bulkData.RowCount);
+            return;
+        }
 
         int effectiveBlockSize = Math.Max(blockSize, 1);
         try
@@ -2624,6 +2653,13 @@ public sealed class NzConnection : DbConnection
             cancellationToken: cancellationToken).ConfigureAwait(false);
         _logger?.LogInformation("Format={Format} Block size={BlockSize} Host version={HostVersion}", format, blockSize, hostVersion);
 
+        if (_pendingBulkData is { } bulkData)
+        {
+            await bulkData.WriteRowsAsync(_stream, blockSize, cancellationToken).ConfigureAwait(false);
+            _logger?.LogInformation("Streamed {RowCount} bulk-insert rows from memory", bulkData.RowCount);
+            return;
+        }
+
         int effectiveBlockSize = Math.Max(blockSize, 1);
         try
         {
@@ -2685,6 +2721,30 @@ public sealed class NzConnection : DbConnection
         {
             _logger?.LogWarning(ex, "Error opening file");
             throw new NetezzaException("Error opening file", ex);
+        }
+    }
+
+    private void DrainFileTransferPayload()
+    {
+        while (true)
+        {
+            int length = ReadProtocolLength("fileTransfer.chunkLength");
+            if (length == 0)
+                return;
+            _ = ReadMessagePayload(length);
+        }
+    }
+
+    private async Task DrainFileTransferPayloadAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            int length = await ReadProtocolLengthAsync(
+                "fileTransfer.chunkLength",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (length == 0)
+                return;
+            _ = await ReadMessagePayloadAsync(length, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -4705,6 +4765,49 @@ public sealed class NzConnection : DbConnection
     public NzCommand CreateCommand(string sql)
     {
         return (NzCommand)CreateDbCommand(sql);
+    }
+
+    /// <summary>
+    /// Creates a bulk-copy helper for inserting rows into a Netezza table.
+    /// </summary>
+    public NzBulkCopy CreateBulkCopy() => new(this);
+
+    internal bool ExecuteBulkCopy(NzCommand command, string sql, BulkInsertData data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        if (_pendingBulkData is not null)
+            throw new InvalidOperationException("A bulk transfer is already active on this connection.");
+
+        _pendingBulkData = data;
+        try
+        {
+            return Execute(command, sql);
+        }
+        finally
+        {
+            _pendingBulkData = null;
+        }
+    }
+
+    internal async Task<bool> ExecuteBulkCopyAsync(
+        NzCommand command,
+        string sql,
+        BulkInsertData data,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        if (_pendingBulkData is not null)
+            throw new InvalidOperationException("A bulk transfer is already active on this connection.");
+
+        _pendingBulkData = data;
+        try
+        {
+            return await ExecuteAsync(command, sql, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _pendingBulkData = null;
+        }
     }
 
     public override void Open()

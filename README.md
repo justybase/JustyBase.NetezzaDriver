@@ -111,7 +111,8 @@ var builder = new NzConnectionStringBuilder
     Port = 5480,
     Pooling = true,
     MinPoolSize = 1,
-    MaxPoolSize = 10
+    MaxPoolSize = 10,
+    BulkInsert = true   // NzBulkCopy external-table transfer (default)
 };
 
 using var connection = new NzConnection(builder.ConnectionString);
@@ -134,6 +135,7 @@ connection.Open();
 | Query cancellation | ✅ | `CancelQuery` and `CancellationToken` |
 | TLS / certificate validation | ✅ | Strict validation by default |
 | Streaming rows | ✅ | Reader and mapped async enumeration |
+| Bulk copy | ✅ | `NzBulkCopy` streams text rows through the external-table protocol |
 | Structured server errors | ✅ | SQLSTATE, severity, detail, hint, raw response |
 | AOT compatibility | ✅ | `IsAotCompatible=true` |
 | Netezza data types | ✅ | Numeric, text, temporal, interval, bytea and more |
@@ -177,6 +179,49 @@ var count = await command2.ExecuteScalarAsync();
 | `Guid` | `'guid'` |
 
 See [`src/docs/parameters.md`](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/parameters.md) for the full reference.
+
+## Bulk inserts
+
+Use `NzBulkCopy` to insert positional rows using Netezza's external-table
+transfer protocol. For two or more supported rows it sends one
+`INSERT … SELECT … FROM EXTERNAL` statement and streams the payload over the
+existing connection; it does not create a local file or a second connection.
+
+```csharp
+var bulk = connection.CreateBulkCopy();
+bulk.DestinationTableName = "ADMIN.TARGET";
+bulk.ColumnNames.Add("ID");
+bulk.ColumnNames.Add("NAME");
+bulk.ColumnNames.Add("CREATED");
+
+int inserted = await bulk.WriteToServerAsync(new object?[][]
+{
+    new object?[] { 1, "one", new DateOnly(2026, 11, 22) },
+    new object?[] { 2, "zażółć 😀", new DateOnly(2026, 11, 23) }
+});
+```
+
+`WriteToServer` also accepts a `DataTable` or `IDataReader`; the async API
+accepts a `DataTable`, positional rows or a `DbDataReader`. If `ColumnNames` is
+empty, source values are assigned in the table's column order. Supported
+values include strings, numbers, booleans, `DateOnly`, `TimeOnly`, `DateTime`,
+`TimeSpan` and `Guid`; `null`/`DBNull` are preserved. Values that cannot be
+represented safely by the text import format (for example, `byte[]`, non-finite
+floating-point values or unsupported control characters) use row-by-row
+`INSERT` fallback. One-row writes also use the fallback.
+
+Source rows are buffered in memory before transfer so the driver can infer
+external-column widths and determine whether fallback is required before
+starting the statement. External-table bulk copy is enabled by default. To
+force row-by-row inserts, set `BulkInsert = false` in
+`NzConnectionStringBuilder` (or `BulkInsert=False` in the connection string).
+The bulk statement is atomic at the statement level; fallback inserts follow
+the connection's normal transaction/autocommit behavior.
+
+Bulk copy is **explicit**: the driver does not detect multiple `ExecuteNonQuery`
+calls or rewrite multi-statement `CommandText`. Use `NzBulkCopy` to opt in.
+
+See [`src/docs/bulk_copy.md`](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/bulk_copy.md) for the full API and behavior reference.
 
 ## Streaming large result sets
 

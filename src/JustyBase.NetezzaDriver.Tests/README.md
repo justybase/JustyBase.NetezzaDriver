@@ -45,6 +45,18 @@ Set `NZ_PROTOCOL_TRACE=1` to print backend response types and raw protocol
 length fields captured by that test. The regression query is intentionally
 fixed to `SELECT * FROM JUST_DATA.ADMIN.DIMDATE`.
 
+## Bulk-copy benchmark
+
+The external-table bulk-copy vs row-by-row benchmark is opt-in and only runs
+when `NZ_BULK_COPY_BENCHMARK=1` is set:
+
+```powershell
+$env:NZ_BULK_COPY_BENCHMARK = "1"
+dotnet test .\src\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj `
+  -c Release `
+  --filter "FullyQualifiedName~BulkCopyPerformanceLiveTests"
+```
+
 ## Read-only stress test
 
 The stress test is skipped unless `NZ_STRESS=1` is set. It starts four

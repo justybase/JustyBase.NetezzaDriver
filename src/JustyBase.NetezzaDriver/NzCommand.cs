@@ -179,6 +179,9 @@ public sealed class NzCommand : DbCommand
     }
 
     private NzCommand Execute(string operation)
+        => Execute(operation, null);
+
+    private NzCommand Execute(string operation, BulkInsertData? bulkData)
     {
         try
         {
@@ -189,7 +192,10 @@ public sealed class NzCommand : DbCommand
                 _connection.Execute(this, "begin");
                 _connection.InTransaction = true;
             }
-            _connection.Execute(this, resolvedSql);
+            if (bulkData is null)
+                _connection.Execute(this, resolvedSql);
+            else
+                _connection.ExecuteBulkCopy(this, resolvedSql, bulkData);
             _connection.SetState(ConnectionState.Open);
         }
         catch (AttributeException ex)
@@ -208,7 +214,19 @@ public sealed class NzCommand : DbCommand
         return this;
     }
 
+    internal int ExecuteBulkCopy(string operation, BulkInsertData data)
+    {
+        Execute(operation, data);
+        return _recordsAffected;
+    }
+
     private async Task<NzCommand> ExecuteAsync(string operation, CancellationToken cancellationToken = default)
+        => await ExecuteAsync(operation, null, cancellationToken).ConfigureAwait(false);
+
+    private async Task<NzCommand> ExecuteAsync(
+        string operation,
+        BulkInsertData? bulkData,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -219,7 +237,10 @@ public sealed class NzCommand : DbCommand
                 await _connection.ExecuteAsync(this, "begin", cancellationToken).ConfigureAwait(false);
                 _connection.InTransaction = true;
             }
-            await _connection.ExecuteAsync(this, resolvedSql, cancellationToken).ConfigureAwait(false);
+            if (bulkData is null)
+                await _connection.ExecuteAsync(this, resolvedSql, cancellationToken).ConfigureAwait(false);
+            else
+                await _connection.ExecuteBulkCopyAsync(this, resolvedSql, bulkData, cancellationToken).ConfigureAwait(false);
             _connection.SetState(ConnectionState.Open);
         }
         catch (AttributeException ex)
@@ -236,6 +257,15 @@ public sealed class NzCommand : DbCommand
             throw;
         }
         return this;
+    }
+
+    internal async Task<int> ExecuteBulkCopyAsync(
+        string operation,
+        BulkInsertData data,
+        CancellationToken cancellationToken = default)
+    {
+        await ExecuteAsync(operation, data, cancellationToken).ConfigureAwait(false);
+        return _recordsAffected;
     }
 
     private NzDataReader? _prevReader;

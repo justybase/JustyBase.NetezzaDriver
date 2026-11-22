@@ -605,6 +605,28 @@ nigdy nie wołał `GetValue()`.
 
 ---
 
+## 5. NzBulkCopy benchmark (opt-in)
+
+`BulkCopyPerformanceLiveTests.CompareExternalTableBulkCopyWithRowByRowFallback`
+compares insertion of 10,000 rows through the external-table transfer against
+the `BulkInsert=False` row-by-row fallback. It reports elapsed time and the
+observed speedup; no appliance result is recorded here because the benchmark
+requires a live Netezza instance.
+
+Run it explicitly:
+
+```powershell
+$env:NZ_BULK_COPY_BENCHMARK = "1"
+dotnet test .\src\JustyBase.NetezzaDriver.Tests\JustyBase.NetezzaDriver.Tests.csproj `
+  -c Release `
+  --filter "FullyQualifiedName~BulkCopyPerformanceLiveTests"
+```
+
+The regular integration-test run returns immediately from this benchmark
+unless `NZ_BULK_COPY_BENCHMARK=1` is set.
+
+---
+
 ## DO NOT TOUCH WITHOUT PROFILING
 
 Po powyższych poprawkach driver uznaje się za architektonicznie domknięty:

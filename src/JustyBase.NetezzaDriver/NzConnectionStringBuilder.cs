@@ -19,6 +19,8 @@ public sealed class NzConnectionStringBuilder
     public int MaxPoolSize { get; set; } = 10;
     public int ConnectionIdleTimeout { get; set; } = 30;
     public int ConnectionLifetime { get; set; } = 0;
+    /// <summary>Enables the external-table path used by <see cref="NzBulkCopy"/>.</summary>
+    public bool BulkInsert { get; set; } = true;
     /// <summary>Default seconds a pooled connection may remain idle before it is probed with SELECT 1 on checkout.</summary>
     public const int DefaultConnectionValidationInterval = 30;
 
@@ -49,6 +51,7 @@ public sealed class NzConnectionStringBuilder
         sb.Append($"ConnectionIdleTimeout={ConnectionIdleTimeout};");
         if (ConnectionLifetime > 0)
             sb.Append($"ConnectionLifetime={ConnectionLifetime};");
+        sb.Append($"BulkInsert={BulkInsert};");
         // Always persist: 0 is a valid explicit setting (validate on every
         // checkout) and must survive builder -> string -> parser round trips.
         sb.Append($"ConnectionValidationInterval={ConnectionValidationInterval};");
