@@ -1,4 +1,5 @@
 using JustyBase.NetezzaDriver.TestSupport;
+using System.Data;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -308,6 +309,39 @@ public sealed class WireReplayTests
         Assert.Null(outcome.Error);
         Assert.True(outcome.FieldCount >= 1);
         Assert.Equal("1", Text(Assert.Single(outcome.Rows)[0]));
+    }
+
+    [Fact]
+    public async Task Wire_MultiResult_ColumnSchemaTracksEachResultSet()
+    {
+        WireFixture wire = Load("multi_result.bin");
+        await using var server = Start(wire, onQuery: null);
+        using var connection = OpenConnection(server.Port);
+        using var command = connection.CreateCommand(wire.Records[0].Sql);
+        using var reader = command.ExecuteReader();
+        var nzReader = (NzDataReader)reader;
+
+        Assert.Equal(["A"], nzReader.GetColumnSchema().Select(column => column.ColumnName));
+        DataTable firstTable = Assert.IsType<DataTable>(nzReader.GetSchemaTable());
+        while (reader.Read())
+        {
+        }
+
+        Assert.True(await reader.NextResultAsync());
+        Assert.Equal(["B", "C"], nzReader.GetColumnSchema().Select(column => column.ColumnName));
+        DataTable secondTable = Assert.IsType<DataTable>(nzReader.GetSchemaTable());
+        Assert.NotSame(firstTable, secondTable);
+        while (reader.Read())
+        {
+        }
+
+        Assert.True(reader.NextResult());
+        Assert.Equal(["D"], nzReader.GetColumnSchema().Select(column => column.ColumnName));
+        while (reader.Read())
+        {
+        }
+
+        Assert.False(reader.NextResult());
     }
 
     private static WireFixture Load(string name) => WireFixture.LoadShipped(name);

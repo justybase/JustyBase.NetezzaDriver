@@ -56,7 +56,7 @@ var builder = new NzConnectionStringBuilder
     UserName = "admin",
     Password = "password",
     Port = 5480,
-    Pooling = true,
+    // NzConnectionPool always pools; these keys configure its sizing.
     MinPoolSize = 2,
     MaxPoolSize = 20,
     ConnectionIdleTimeout = 60,

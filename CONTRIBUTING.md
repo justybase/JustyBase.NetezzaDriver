@@ -6,8 +6,9 @@ Netezza appliance.
 
 ## Prerequisites
 
-- .NET SDK 10 and 11 (the test project targets `net10.0` and `net11.0`).
-- PowerShell 7 for the coverage gate and conformance examples.
+- .NET SDK 11.0.100 or a newer 11.0.x feature band (`global.json` pins 11)
+  and the .NET 10 runtime for the `net10.0` test target.
+- PowerShell 7 for the coverage gate.
 - Optional: a Netezza appliance for integration and benchmark tests.
 
 ## Repository layout
@@ -16,7 +17,7 @@ Netezza appliance.
 |---|---|
 | `src/JustyBase.NetezzaDriver` | Driver assembly and public API. |
 | `src/JustyBase.NetezzaDriver.Tests` | Unit, replay, integration and benchmark tests. |
-| `src/JustyBase.NetezzaDriver.TestSupport` | Replay server, wire fixtures and TLS helpers. |
+| `src/JustyBase.NetezzaDriver.TestSupport` | Replay server and wire fixtures. |
 | `src/JustyBase.NetezzaDriver.Benchmarks` | BenchmarkDotNet suites. |
 | `src/docs` | Focused user documentation. |
 | `tools/JustyBase.NetezzaDriver.Conformance` | Cross-driver conformance runner. |

@@ -855,6 +855,7 @@ public sealed class NzDataReader : DbDataReader, IDbColumnSchemaGenerator
     {
         ThrowIfDisposed();
         _needsToBeNextResultCalled = false;
+        InvalidateSchemaCache();
         return _opened;
     }
 
@@ -863,7 +864,18 @@ public sealed class NzDataReader : DbDataReader, IDbColumnSchemaGenerator
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
         _needsToBeNextResultCalled = false;
+        InvalidateSchemaCache();
         return Task.FromResult(_opened);
+    }
+
+    /// <summary>
+    /// A reader can expose multiple result sets; the schema caches belong to
+    /// the current one and must not leak into the next.
+    /// </summary>
+    private void InvalidateSchemaCache()
+    {
+        _schemaTable = null;
+        _columnSchema = null;
     }
 
     public bool ShouldContinue => _opened && !_disposed;

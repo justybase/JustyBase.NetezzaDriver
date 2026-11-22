@@ -1,7 +1,9 @@
 # TLS and text encoding
 
-The driver follows the `sslmode` contract used by the Rust, Node, Java and
-Python drivers, so the same operational policy can be shared across runtimes.
+The driver implements the shared `sslmode` vocabulary used by the other
+JustyBase drivers: `disable`, `prefer` (default), `require`, `verify-ca` and
+`verify-full`. The Java driver additionally accepts `allow`; that value is not
+implemented here.
 
 ## TLS modes
 
@@ -21,7 +23,7 @@ with a CA bundle.
 ```csharp
 using var connection = new NzConnection(
     "Host=nps.example.com;Database=ANALYTICS;User=etl;Password=secret;" +
-    "SslMode=verify-full;SslCertFilePath=/etc/pki/neteza-ca.pem");
+    "SslMode=verify-full;SslCertFilePath=/etc/pki/netezza-ca.pem");
 ```
 
 ## CA bundle, not a client certificate
@@ -33,7 +35,8 @@ certificate is sent during the handshake. This matches the
 
 When a bundle is supplied, the driver builds an `X509Chain` with
 `CustomRootTrust` and only the configured roots are trusted. System trust
-stores are not silently mixed in.
+stores are not silently mixed in. The leaf certificate must also carry the
+server-authentication EKU (`1.3.6.1.5.5.7.3.1`).
 
 ## `RejectUnauthorized`
 

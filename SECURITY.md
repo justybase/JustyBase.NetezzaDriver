@@ -28,7 +28,8 @@ disclosure.
 - `SslMode=require` is encrypted but does not validate the certificate by
   default; use `verify-ca` or `verify-full` for production.
 - `SslCertFilePath` is a PEM **CA bundle**, not a client certificate. No client
-  certificate is sent.
+  certificate is sent. Custom-CA validation requires the server-authentication
+  EKU on the leaf certificate.
 - `RejectUnauthorized=false` is accepted only for `disable`, `prefer` and
   `require`. It cannot weaken `verify-ca` or `verify-full`.
 - TLS 1.2 and TLS 1.3 are enabled. Older protocol versions are not offered.
@@ -69,7 +70,7 @@ untrusted data.
 ## Dependency and release hygiene
 
 - The package has no native dependencies.
-- CI runs formatting, unit tests, coverage gates, offline conformance and pack
-  on Linux and Windows.
+- CI runs formatting, build and unit tests on Linux and Windows, coverage and
+  offline conformance on Linux, and a pack smoke check on Linux.
 - Publish workflows use NuGet trusted publishing (`nuget/login`) rather than a
   long-lived API key in the repository.

@@ -6,11 +6,18 @@ All notable changes to `JustyBase.NetezzaDriver` are documented here.
 
 ### Changed
 
-- `GetColumnSchema()` caches the immutable `DbColumn` collection per reader;
-  repeated calls no longer rebuild the metadata graph.
+- `GetColumnSchema()` caches the immutable `DbColumn` collection per current
+  result set; repeated calls no longer rebuild the metadata graph.
 - `NzDataReader` implements `IDbColumnSchemaGenerator`, so
   `DbDataReaderExtensions.GetColumnSchema` returns provider-native
   `NzDbColumn` objects instead of rebuilding `DataRowDbColumn` wrappers.
+
+### Fixed
+
+- `GetSchemaTable()` and `GetColumnSchema()` invalidate their caches when
+  `NextResult()` advances to another result set.
+- Custom CA validation now requires the server-authentication EKU on the leaf
+  certificate instead of accepting any certificate signed by a trusted root.
 
 ## 1.12.2
 

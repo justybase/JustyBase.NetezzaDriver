@@ -106,6 +106,27 @@ public sealed class TlsHandshakeTests
     }
 
     [Fact]
+    public async Task VerifyCa_RejectsCertificateWithoutServerAuthEku()
+    {
+        using var material = TlsTestCertificate.Create(serverAuthEku: false);
+        await using var server = StartServer(material.ServerCertificate);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, server.Port);
+        var handshake = new Handshake(
+            client.Client,
+            client.GetStream(),
+            "localhost",
+            material.CaPath,
+            loggerFactory: null,
+            rejectUnauthorized: true,
+            verifyHostname: false);
+
+        Assert.ThrowsAny<Exception>(() => handshake.Startup(
+            "db", SecurityLevelCode.OnlySecuredSession, "u", "p", pgOptions: null));
+    }
+
+    [Fact]
     public async Task VerifyCa_RejectsUntrustedCertificate()
     {
         using var material = TlsTestCertificate.Create();
@@ -209,7 +230,7 @@ public sealed class TlsHandshakeTests
         public required X509Certificate2 ServerCertificate { get; init; }
         public required string CaPath { get; init; }
 
-        public static TlsTestCertificate Create()
+        public static TlsTestCertificate Create(bool serverAuthEku = true)
         {
             DateTimeOffset notBefore = DateTimeOffset.UtcNow.AddDays(-1);
             DateTimeOffset notAfter = DateTimeOffset.UtcNow.AddYears(1);
@@ -242,7 +263,10 @@ public sealed class TlsHandshakeTests
                     critical: true));
             serverRequest.CertificateExtensions.Add(
                 new X509EnhancedKeyUsageExtension(
-                    new OidCollection { new("1.3.6.1.5.5.7.3.1") },
+                    new OidCollection
+                    {
+                        new(serverAuthEku ? "1.3.6.1.5.5.7.3.1" : "1.3.6.1.5.5.7.3.2"),
+                    },
                     critical: false));
 
             byte[] serial = new byte[8];

@@ -1233,10 +1233,11 @@ schema browsers can call both APIs repeatedly on the same reader.
 
 ### After
 
-The first call builds the immutable collection; later calls return the same
-`ReadOnlyCollection<DbColumn>` and the same `NzDbColumn` instances. There is no
-public mutation path: the extended properties use internal setters and the base
-`DbColumn` properties are read-only.
+The first call builds the immutable collection for the current result set;
+later calls return the same `ReadOnlyCollection<DbColumn>` and the same
+`NzDbColumn` instances. There is no public mutation path: the extended
+properties use internal setters and the base `DbColumn` properties are
+read-only.
 
 ### Measurement
 
@@ -1249,11 +1250,17 @@ public mutation path: the extended properties use internal setters and the base
 | Change | **-43.4%** | **-95.5%** |
 
 The first call still allocates the 19-column graph; the benchmark isolates the
-repeated-call path. `NzDataReader` also implements `IDbColumnSchemaGenerator`,
+repeated-call path. `ShortRun` has a wide confidence interval, so treat the
+absolute mean as indicative; the allocation reduction is deterministic. Use
+`--job medium` before using these numbers for a release decision.
+`NzDataReader` also implements `IDbColumnSchemaGenerator`,
 so the standard `DbDataReaderExtensions.GetColumnSchema` path now returns the
 same cached native `NzDbColumn` objects instead of building `DataRowDbColumn`
-wrappers from `GetSchemaTable`. A regression test asserts reference identity
-across synchronous and asynchronous calls (`AdoNetComplianceTests`).
+wrappers from `GetSchemaTable`. Both schema caches are invalidated when
+`NextResult()` advances to another result set; a replay test covers the
+`A` / `B,C` / `D` result sets in `multi_result.bin`. A regression test asserts
+reference identity across synchronous and asynchronous calls
+(`AdoNetComplianceTests`).
 
 ### Decision
 

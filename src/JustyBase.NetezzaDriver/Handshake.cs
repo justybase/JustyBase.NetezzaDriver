@@ -879,6 +879,9 @@ internal sealed class Handshake
         customChain.ChainPolicy.CustomTrustStore.AddRange(caCertificates);
         customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
         customChain.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
+        // A custom chain bypasses SslStream's own application-policy check;
+        // require the server-authentication EKU explicitly.
+        customChain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
 
         bool valid = customChain.Build(serverCertificate);
         if (!valid)

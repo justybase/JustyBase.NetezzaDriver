@@ -111,9 +111,6 @@ var builder = new NzConnectionStringBuilder
     UserName = "user",
     Password = "pass",
     Port = 5480,
-    Pooling = true,
-    MinPoolSize = 1,
-    MaxPoolSize = 10,
     BulkInsert = true,   // NzBulkCopy external-table transfer (default)
     SslMode = SslMode.VerifyFull,
     SslCertFilePath = @"C:\certs\netezza-ca.pem",
@@ -123,6 +120,9 @@ var builder = new NzConnectionStringBuilder
 using var connection = new NzConnection(builder.ConnectionString);
 connection.Open();
 ```
+
+Pooling is explicit: `NzConnection` does not create a pool. Pass the same
+builder to `NzConnectionPool` when you want pooled physical connections.
 
 ## Feature overview
 
@@ -292,7 +292,8 @@ var result = await command.ExecuteScalarAsync();
 | `connectionLifetimeSeconds` | `0` | Maximum connection age (`0` = unlimited) |
 
 The pool validates connections, rolls back open transactions when a connection
-is returned, and runs maintenance in the background. See
+is returned, and runs maintenance in the background. The `Pooling` key alone
+does not make `NzConnection` pooled; create a pool explicitly. See
 [`src/docs/pooling.md`](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/pooling.md) for details.
 
 ## Catalog introspection
@@ -333,7 +334,7 @@ string declared = reader.GetDeclaredTypeName(0); // e.g. "VARCHAR(32)"
 
 Each `NzDbColumn` includes `ProviderType`, `TypeModifier` and
 `DeclaredTypeName`. The returned collection and column objects are immutable
-and cached for the lifetime of the reader, so repeated schema queries do not
+and cached for the current result set, so repeated schema queries do not
 rebuild the metadata graph. `NzDataReader` implements
 `IDbColumnSchemaGenerator`, so the standard `DbDataReaderExtensions` path
 returns the same native objects instead of `DataRowDbColumn` wrappers.
@@ -361,8 +362,10 @@ for details.
 
 ## TLS and security
 
-The driver accepts the same `sslmode` values as the Rust, Node and Java
-drivers. Certificate validation is **strict by default**.
+The driver implements the shared `sslmode` vocabulary:
+`disable`, `prefer` (default), `require`, `verify-ca` and `verify-full`.
+Certificate validation is **strict by default**. The Java driver also accepts
+`allow`; this driver does not implement it.
 
 | `SslMode` | Handshake | Server certificate |
 |---|---|---|
@@ -413,7 +416,7 @@ DbProviderFactories.RegisterFactory(
 
 DbConnection connection = NzFactory.Instance.CreateConnection()!;
 connection.ConnectionString =
-    "Host=host;Database=db;User=user;Password=pass;Pooling=True";
+    "Host=host;Database=db;User=user;Password=pass";
 connection.Open();
 ```
 
@@ -445,7 +448,8 @@ dotnet run -c Release -f net10.0 \
 ```
 
 Earlier optimization passes, including rejected experiments and allocation
-details, are recorded in [PERFORMANCE.md](PERFORMANCE.md).
+details, are recorded in
+[PERFORMANCE.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/PERFORMANCE.md).
 
 Sample results (Windows 11, .NET 10):
 
@@ -493,8 +497,8 @@ Live tests read their configuration from:
 No credentials or lab addresses are embedded in the repository. Live tests fail
 fast when the variables are missing. `NZ_DEV_ALLOW_LAB_DEFAULTS=1` opts into the
 disposable-lab defaults and must not be used in CI. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the test categories and benchmark
-commands.
+[CONTRIBUTING.md](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/CONTRIBUTING.md)
+for the test categories and benchmark commands.
 
 The unit suite includes byte-exact replays of the shared golden wire corpus
 (`src/JustyBase.NetezzaDriver.TestSupport/Fixtures/Wire`), fault injection for
