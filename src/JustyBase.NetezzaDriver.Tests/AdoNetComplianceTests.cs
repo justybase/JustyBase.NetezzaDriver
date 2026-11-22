@@ -192,6 +192,17 @@ public sealed class AdoNetComplianceTests
     }
 
     [Fact]
+    public void ConnectionString_InvalidPortAndTimeout_FallBackToDefaults()
+    {
+        using var connection = new NzConnection(
+            "Host=h;Database=d;User=u;Password=p;Port=abc;Timeout=xyz");
+
+        Assert.Equal(15, connection.ConnectionTimeout);
+        Assert.Contains("Port=5480", connection.ConnectionString);
+        Assert.Contains("Timeout=15", connection.ConnectionString);
+    }
+
+    [Fact]
     public void ConnectionString_RoundTripsSemicolonPassword()
     {
         using var connection = new NzConnection();

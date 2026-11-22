@@ -206,8 +206,27 @@ public sealed class NzConnection : DbConnection
             ? Convert.ToString(rawDatabase, CultureInfo.InvariantCulture)
             : null;
 
-        int? port = builder.TryGetValue("Port", out _) ? builder.Port : null;
-        int? timeout = builder.TryGetValue("Timeout", out _) ? builder.Timeout : null;
+        int? port = null;
+        if (builder.TryGetValue("Port", out var rawPort)
+            && int.TryParse(
+                Convert.ToString(rawPort, CultureInfo.InvariantCulture),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out var parsedPort))
+        {
+            port = parsedPort;
+        }
+
+        int? timeout = null;
+        if (builder.TryGetValue("Timeout", out var rawTimeout)
+            && int.TryParse(
+                Convert.ToString(rawTimeout, CultureInfo.InvariantCulture),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out var parsedTimeout))
+        {
+            timeout = parsedTimeout;
+        }
         bool pooling = !builder.TryGetValue("Pooling", out _) || builder.Pooling;
         int minPoolSize = builder.TryGetValue("MinPoolSize", out _) ? builder.MinPoolSize : 0;
         int maxPoolSize = builder.TryGetValue("MaxPoolSize", out _) ? builder.MaxPoolSize : 10;
