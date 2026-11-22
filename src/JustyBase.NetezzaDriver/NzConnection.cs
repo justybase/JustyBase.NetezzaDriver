@@ -19,11 +19,11 @@ public sealed class NzConnection : DbConnection
 {
     private string? _error;
     private NetezzaException? _backendException;
- 
+
     private int _commandNumber = -1;
 
     public bool InTransaction { get; set; } = false;//TODO
-    public bool AutoCommit { get;set; } = true;
+    public bool AutoCommit { get; set; } = true;
 
     /// <summary>
     /// The physical connection socket to the backend.
@@ -254,7 +254,7 @@ public sealed class NzConnection : DbConnection
     }
 
 
-    public TimeSpan ConnectionTimeoutDuration { get; set; } =  TimeSpan.FromSeconds(15);
+    public TimeSpan ConnectionTimeoutDuration { get; set; } = TimeSpan.FromSeconds(15);
 
     public override int ConnectionTimeout => (int)ConnectionTimeoutDuration.TotalSeconds;
 
@@ -305,7 +305,7 @@ public sealed class NzConnection : DbConnection
             _socket.ReceiveTimeout = (int)ConnectionTimeoutDuration.TotalMilliseconds;
 
             var baseStream = new NetworkStream(_socket, ownsSocket: true);
-            
+
 
             if (_tcpKeepAlive)
             {
@@ -387,7 +387,7 @@ public sealed class NzConnection : DbConnection
     }
 
 #if NET9_0_OR_GREATER
-    private static readonly Lock _cancelLock = new ();
+    private static readonly Lock _cancelLock = new();
 #else
     private static readonly object _cancelLock = new ();
 #endif
@@ -1013,7 +1013,11 @@ public sealed class NzConnection : DbConnection
             //if (State == ConnectionState.Executing)
             if (State != ConnectionState.Connecting)
             {
-                _readBuffer!.Skip(4);
+                // Netezza terminates a query with ReadyForQuery followed by an
+                // optional run of NUL padding. Consume only padding that is
+                // already buffered: some captures/appliances end at the frame
+                // header, so a blocking four-byte skip would wait for the next
+                // response before the next query is even sent.
                 EnsureProtocolSynced(query);
             }
             byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
@@ -1077,7 +1081,8 @@ public sealed class NzConnection : DbConnection
             nzCommand.NewPreparedStatement.Sql = query;
             if (State != ConnectionState.Connecting)
             {
-                await SkipBytesAsync(4, cancellationToken).ConfigureAwait(false);
+                // See PreExecution: ReadyForQuery may or may not be followed by
+                // NUL padding. Drain only what is already available.
                 await EnsureProtocolSyncedAsync(query, cancellationToken).ConfigureAwait(false);
             }
             byte[] writeBuffer = RentQueryBuffer(query is null ? 16 : 10 + 4 * query.Length, out bool pooledWriteBuffer);
@@ -1208,14 +1213,14 @@ public sealed class NzConnection : DbConnection
     }
 
     private TimeSpan _defaultCommandTimeout = TimeSpan.FromSeconds(60);
-    public TimeSpan DefaultCommandTimeout 
-    { 
-        get => _defaultCommandTimeout; 
-        set 
-        { 
-            _defaultCommandTimeout = value; 
-            CommandTimeout = value; 
-        } 
+    public TimeSpan DefaultCommandTimeout
+    {
+        get => _defaultCommandTimeout;
+        set
+        {
+            _defaultCommandTimeout = value;
+            CommandTimeout = value;
+        }
     }
     public TimeSpan CommandTimeout { get; set; } = TimeSpan.FromSeconds(60);
     /// <summary>
@@ -1228,16 +1233,17 @@ public sealed class NzConnection : DbConnection
     public NzMetadata Meta => _metadata ??= new NzMetadata(this);
 
     [AllowNull]
-    public override string ConnectionString {
+    public override string ConnectionString
+    {
         get => new NzConnectionStringBuilder()
         {
             Host = _host,
             Database = _database,
             UserName = _user,
             Password = _password,
-            Port= _port,
-            Timeout= (int)ConnectionTimeoutDuration.TotalSeconds,
-            LoggerFactory= _loggerFactory,
+            Port = _port,
+            Timeout = (int)ConnectionTimeoutDuration.TotalSeconds,
+            LoggerFactory = _loggerFactory,
             BulkInsert = _bulkInsertEnabled
         }.ConnectionString;
         set
@@ -1558,7 +1564,7 @@ public sealed class NzConnection : DbConnection
         PreExecution(nzCommand, query);
         HandleTimeout(nzCommand.EffectiveCommandTimeout);
         _nextRelatedFileStream = null!;
-        var rdr =  new NzDataReader(nzCommand);
+        var rdr = new NzDataReader(nzCommand);
         if (_error != null)
         {
             throw CreateCurrentException();
@@ -2194,7 +2200,7 @@ public sealed class NzConnection : DbConnection
             // portal query command, no tuples returned
             int length = ReadProtocolLength("commandCompletePayloadLength");
             var data = ReadMessagePayload(length);
-            HandleCommandComplete(data, length,  nzCommand);
+            HandleCommandComplete(data, length, nzCommand);
             //returnet data informs about command type (SELECT/SET VARIABLE/...)
             if (_logger?.IsEnabled(LogLevel.Debug) == true)
                 _logger.LogDebug("Response received from backend: {Data}", Encoding.UTF8.GetString(data, 0, length));
@@ -2543,10 +2549,10 @@ public sealed class NzConnection : DbConnection
         {
             using var filehandle = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, Math.Max(effectiveBlockSize, 4096), useAsync: false);
 
-            if (_logger ?.IsEnabled(LogLevel.Information) == true)
+            if (_logger?.IsEnabled(LogLevel.Information) == true)
             {
                 _logger?.LogInformation("Successfully opened External file to read: {Filename}", filename);
-            }           
+            }
 
             byte[] bytesBuffer = ArrayPool<byte>.Shared.Rent(effectiveBlockSize);
             try
@@ -2586,7 +2592,7 @@ public sealed class NzConnection : DbConnection
                     if (_logger?.IsEnabled(LogLevel.Debug) == true)
                     {
                         _logger?.LogDebug("No. of bytes sent to BE: {BytesSent}", dataBytes.Length);
-                    }                
+                    }
                 }
             }
             finally
@@ -2792,7 +2798,7 @@ public sealed class NzConnection : DbConnection
                     try
                     {
                         int charsWritten = NzConnectionHelpers.ClientEncoding.GetChars(data, 0, numBytes, tmpChars, 0);
-                        writer.Write(tmpChars,0, charsWritten);
+                        writer.Write(tmpChars, 0, charsWritten);
                         writer.Flush();
                         _logger?.LogInformation("Successfully written data into file: {FullPath}", fullpath);
                     }
@@ -3235,7 +3241,7 @@ public sealed class NzConnection : DbConnection
             return encoding.GetString(spanData);
         }
     }
-    
+
     private string GetFixedLenString(int curField, ReadOnlySpan<byte> fieldDataP, int fldlen, int cursize)
     {
         if (fldlen < 120)
@@ -3519,187 +3525,191 @@ public sealed class NzConnection : DbConnection
                 case NzTypeJson:
                 case NzTypeJsonb:
                 case NzTypeJsonpath:
-                {
-                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                    string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
-                    rowValue.typeCode = TypeCodeEx.String;
-                    rowValue.stringValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
-                    break;
-                }
+                    {
+                        int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                        string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
+                        rowValue.typeCode = TypeCodeEx.String;
+                        rowValue.stringValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                        break;
+                    }
 
                 case NzTypeVarBinary:
-                {
-                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                    byte[] value = fieldDataP.Slice(2, cursize).ToArray();
-                    rowValue.typeCode = TypeCodeEx.Object;
-                    rowValue.objectValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=VARBINARY, bytes={Value}", curField + 1, value.Length);
-                    break;
-                }
+                    {
+                        int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                        byte[] value = fieldDataP.Slice(2, cursize).ToArray();
+                        rowValue.typeCode = TypeCodeEx.Object;
+                        rowValue.objectValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=VARBINARY, bytes={Value}", curField + 1, value.Length);
+                        break;
+                    }
 
                 case NzTypeBinary:
-                {
-                    byte[] value = fieldDataP.Slice(0, fldlen).ToArray();
-                    rowValue.typeCode = TypeCodeEx.Object;
-                    rowValue.objectValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=BINARY, bytes={Value}", curField + 1, value.Length);
-                    break;
-                }
+                    {
+                        byte[] value = fieldDataP.Slice(0, fldlen).ToArray();
+                        rowValue.typeCode = TypeCodeEx.Object;
+                        rowValue.objectValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=BINARY, bytes={Value}", curField + 1, value.Length);
+                        break;
+                    }
 
                 case NzTypeChar:
-                {
-                    string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding);
-                    rowValue.typeCode = TypeCodeEx.String;
-                    rowValue.stringValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=CHAR, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        // CHAR is blank-padded in the binary row format. The
+                        // shared wire corpus (and the Rust/Node/Python drivers)
+                        // expose the logical value without the padding.
+                        string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding)
+                            .TrimEnd(' ');
+                        rowValue.typeCode = TypeCodeEx.String;
+                        rowValue.stringValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=CHAR, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeNChar:
                 case NzTypeNVarChar:
-                {
-                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                    string value;
-                    if (fldtype == NzTypeNVarChar || fldlen == cursize)
                     {
-                        value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.ClientEncoding);
+                        int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                        string value;
+                        if (fldtype == NzTypeNVarChar || fldlen == cursize)
+                        {
+                            value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.ClientEncoding);
+                        }
+                        else
+                        {
+                            value = GetFixedLenString(curField, fieldDataP, fldlen, cursize);
+                        }
+                        rowValue.typeCode = TypeCodeEx.String;
+                        rowValue.stringValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                        break;
                     }
-                    else
-                    {
-                        value = GetFixedLenString(curField, fieldDataP, fldlen, cursize);
-                    }
-                    rowValue.typeCode = TypeCodeEx.String;
-                    rowValue.stringValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
-                    break;
-                }
 
                 case NzTypeInt8:  // int64
-                {
-                    long value = BitConverter.ToInt64(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.Int64;
-                    rowValue.int64Value = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt8, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        long value = BitConverter.ToInt64(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.Int64;
+                        rowValue.int64Value = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt8, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeIntvsAbsTimeFIX: //https://github.com/IBM/nzpy/issues/61 //TODO, SELECT CREATEDATE FROM SYSTEM.ADMIN._V_TABLE_STORAGE_STAT
-                {
-                    DateTime value = DateTypes.TimestampRecvInt(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.DateTime;
-                    rowValue.dateTimeValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        DateTime value = DateTypes.TimestampRecvInt(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.DateTime;
+                        rowValue.dateTimeValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeInt:  // int32
-                {
-                    int value = BitConverter.ToInt32(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.Int32;
-                    rowValue.int32Value = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        int value = BitConverter.ToInt32(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.Int32;
+                        rowValue.int32Value = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeInt2:  // int16
-                {
-                    short value = BitConverter.ToInt16(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.Int16;
-                    rowValue.int16Value = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt2, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        short value = BitConverter.ToInt16(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.Int16;
+                        rowValue.int16Value = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt2, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeInt1:
-                {
-                    //sbyte value = (sbyte)fieldDataP[0];
-                    Int16 value = (Int16)(sbyte)fieldDataP[0]; // int 16 to be in pair with ODBC
-                    rowValue.typeCode = TypeCodeEx.Int16; //fix to byte ? 
-                    rowValue.int16Value = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt1, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        //sbyte value = (sbyte)fieldDataP[0];
+                        Int16 value = (Int16)(sbyte)fieldDataP[0]; // int 16 to be in pair with ODBC
+                        rowValue.typeCode = TypeCodeEx.Int16; //fix to byte ?
+                        rowValue.int16Value = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt1, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeDouble:
-                {
-                    double value = BitConverter.ToDouble(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.Double;
-                    rowValue.doubleValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeDouble, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        double value = BitConverter.ToDouble(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.Double;
+                        rowValue.doubleValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeDouble, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeFloat:
-                {
-                    float value = BitConverter.ToSingle(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.Single;
-                    rowValue.singleValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeFloat, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        float value = BitConverter.ToSingle(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.Single;
+                        rowValue.singleValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeFloat, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeDate:
-                {
-                    DateTime value = DateTypes.ToDateTimeFrom4Bytes(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.DateTime;
-                    rowValue.dateTimeValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=DATE, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        DateTime value = DateTypes.ToDateTimeFrom4Bytes(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.DateTime;
+                        rowValue.dateTimeValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=DATE, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeTime:
-                {
-                    TimeSpan value = DateTypes.TimeRecvFloatX2(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.TimeSpan;
-                    rowValue.timeSpanValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIME, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        TimeSpan value = DateTypes.TimeRecvFloatX2(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.TimeSpan;
+                        rowValue.timeSpanValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIME, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeInterval:
-                {
-                    string value = DateTypes.TimeRecvFloatX1(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.String;
-                    rowValue.stringValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=INTERVAL, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        string value = DateTypes.TimeRecvFloatX1(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.String;
+                        rowValue.stringValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=INTERVAL, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeTimeTz: // https://www.ibm.com/docs/en/netezza?topic=tdt-time-time-zone-timetz
-                {
-                    TimeSpan timeSpanVal = DateTypes.TimeRecvFloatX2(fieldDataP);
-                    int timetzZone = BitConverter.ToInt32(fieldDataP.Slice(fldlen - 4));
-                    rowValue.typeCode = TypeCodeEx.String;
-                    rowValue.stringValue = DateTypes.TimetzOutTimetzadt(timeSpanVal, timetzZone);
-                    //rowValue.stringValue = value.ToString();
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMETZ, value={Value}", curField + 1, rowValue.stringValue);
-                    break;
-                }
+                    {
+                        TimeSpan timeSpanVal = DateTypes.TimeRecvFloatX2(fieldDataP);
+                        int timetzZone = BitConverter.ToInt32(fieldDataP.Slice(fldlen - 4));
+                        rowValue.typeCode = TypeCodeEx.String;
+                        rowValue.stringValue = DateTypes.TimetzOutTimetzadt(timeSpanVal, timetzZone);
+                        //rowValue.stringValue = value.ToString();
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMETZ, value={Value}", curField + 1, rowValue.stringValue);
+                        break;
+                    }
 
                 case NzTypeTimestamp:
-                {
-                    DateTime value = DateTypes.ToDateTimeFrom8Bytes(fieldDataP);
-                    rowValue.typeCode = TypeCodeEx.DateTime;
-                    rowValue.dateTimeValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMESTAMP, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        DateTime value = DateTypes.ToDateTimeFrom8Bytes(fieldDataP);
+                        rowValue.typeCode = TypeCodeEx.DateTime;
+                        rowValue.dateTimeValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMESTAMP, value={Value}", curField + 1, value);
+                        break;
+                    }
 
                 case NzTypeNumeric:
-                {
-                    DecodeNumericField(fieldDataP, curField, ref rowValue, logDebug);
-                    break;
-                }
+                    {
+                        DecodeNumericField(fieldDataP, curField, ref rowValue, logDebug);
+                        break;
+                    }
 
                 case NzTypeBool:
-                {
-                    bool value = fieldDataP[0] == 0x01;
-                    rowValue.typeCode = TypeCodeEx.Boolean;
-                    rowValue.boolValue = value;
-                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=BOOL, value={Value}", curField + 1, value);
-                    break;
-                }
+                    {
+                        bool value = fieldDataP[0] == 0x01;
+                        rowValue.typeCode = TypeCodeEx.Boolean;
+                        rowValue.boolValue = value;
+                        if (logDebug) _logger?.LogDebug("field={Field}, datatype=BOOL, value={Value}", curField + 1, value);
+                        break;
+                    }
             }
 
             curField += 1;
@@ -3721,6 +3731,20 @@ public sealed class NzConnection : DbConnection
         int prec = CTableIFieldPrecision(curField);
         int scale = CTableIFieldScale(curField);
         int count = CTableIFieldNumericDigit32Count(curField);
+
+        // System.Decimal has at most 29 significant digits. A NUMERIC(38,19)
+        // value fits in decimal's magnitude but not its precision: parsing it
+        // would silently round (for example 9999999999999999999.9999999999999999999
+        // became 10000000000000000000.000000000). Keep wide numerics exact as
+        // text, matching the Rust/Node/Python drivers.
+        if (prec > 28)
+        {
+            rowValue.typeCode = TypeCodeEx.String;
+            rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
+            if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, rowValue.stringValue);
+            return;
+        }
+
         decimal value;
         try
         {
@@ -3765,185 +3789,188 @@ public sealed class NzConnection : DbConnection
             case NzTypeJson:
             case NzTypeJsonb:
             case NzTypeJsonpath:
-            {
-                int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
-                break;
-            }
+                {
+                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                    string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                    break;
+                }
 
             case NzTypeVarBinary:
-            {
-                int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                byte[] value = fieldDataP.Slice(2, cursize).ToArray();
-                rowValue.typeCode = TypeCodeEx.Object;
-                rowValue.objectValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=VARBINARY, bytes={Value}", curField + 1, value.Length);
-                break;
-            }
+                {
+                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                    byte[] value = fieldDataP.Slice(2, cursize).ToArray();
+                    rowValue.typeCode = TypeCodeEx.Object;
+                    rowValue.objectValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=VARBINARY, bytes={Value}", curField + 1, value.Length);
+                    break;
+                }
 
             case NzTypeBinary:
-            {
-                byte[] value = fieldDataP.Slice(0, fldlen).ToArray();
-                rowValue.typeCode = TypeCodeEx.Object;
-                rowValue.objectValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=BINARY, bytes={Value}", curField + 1, value.Length);
-                break;
-            }
+                {
+                    byte[] value = fieldDataP.Slice(0, fldlen).ToArray();
+                    rowValue.typeCode = TypeCodeEx.Object;
+                    rowValue.objectValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=BINARY, bytes={Value}", curField + 1, value.Length);
+                    break;
+                }
 
             case NzTypeChar:
-            {
-                string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding);
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=CHAR, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    // See the synchronous decoder: CHAR padding is not part of
+                    // the logical value.
+                    string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding)
+                        .TrimEnd(' ');
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=CHAR, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeNChar:
             case NzTypeNVarChar:
-            {
-                int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                string value;
-                if (fldtype == NzTypeNVarChar || fldlen == cursize)
                 {
-                    value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.ClientEncoding);
+                    int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
+                    string value;
+                    if (fldtype == NzTypeNVarChar || fldlen == cursize)
+                    {
+                        value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.ClientEncoding);
+                    }
+                    else
+                    {
+                        value = GetFixedLenString(curField, fieldDataP, fldlen, cursize);
+                    }
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
+                    break;
                 }
-                else
-                {
-                    value = GetFixedLenString(curField, fieldDataP, fldlen, cursize);
-                }
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
-                break;
-            }
 
             case NzTypeInt8:
-            {
-                long value = BitConverter.ToInt64(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Int64;
-                rowValue.int64Value = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt8, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    long value = BitConverter.ToInt64(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Int64;
+                    rowValue.int64Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt8, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeIntvsAbsTimeFIX:
-            {
-                DateTime value = DateTypes.TimestampRecvInt(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.DateTime;
-                rowValue.dateTimeValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    DateTime value = DateTypes.TimestampRecvInt(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.DateTime;
+                    rowValue.dateTimeValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeInt:
-            {
-                int value = BitConverter.ToInt32(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Int32;
-                rowValue.int32Value = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    int value = BitConverter.ToInt32(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Int32;
+                    rowValue.int32Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt4, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeInt2:
-            {
-                short value = BitConverter.ToInt16(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Int16;
-                rowValue.int16Value = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt2, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    short value = BitConverter.ToInt16(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Int16;
+                    rowValue.int16Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt2, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeInt1:
-            {
-                Int16 value = (Int16)(sbyte)fieldDataP[0];
-                rowValue.typeCode = TypeCodeEx.Int16;
-                rowValue.int16Value = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt1, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    Int16 value = (Int16)(sbyte)fieldDataP[0];
+                    rowValue.typeCode = TypeCodeEx.Int16;
+                    rowValue.int16Value = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeInt1, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeDouble:
-            {
-                double value = BitConverter.ToDouble(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Double;
-                rowValue.doubleValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeDouble, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    double value = BitConverter.ToDouble(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Double;
+                    rowValue.doubleValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeDouble, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeFloat:
-            {
-                float value = BitConverter.ToSingle(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.Single;
-                rowValue.singleValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeFloat, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    float value = BitConverter.ToSingle(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.Single;
+                    rowValue.singleValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=NzTypeFloat, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeDate:
-            {
-                DateTime value = DateTypes.ToDateTimeFrom4Bytes(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.DateTime;
-                rowValue.dateTimeValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=DATE, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    DateTime value = DateTypes.ToDateTimeFrom4Bytes(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.DateTime;
+                    rowValue.dateTimeValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=DATE, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeTime:
-            {
-                TimeSpan value = DateTypes.TimeRecvFloatX2(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.TimeSpan;
-                rowValue.timeSpanValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIME, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    TimeSpan value = DateTypes.TimeRecvFloatX2(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.TimeSpan;
+                    rowValue.timeSpanValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIME, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeInterval:
-            {
-                string value = DateTypes.TimeRecvFloatX1(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=INTERVAL, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    string value = DateTypes.TimeRecvFloatX1(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=INTERVAL, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeTimeTz:
-            {
-                TimeSpan timeSpanVal = DateTypes.TimeRecvFloatX2(fieldDataP);
-                int timetzZone = BitConverter.ToInt32(fieldDataP.Slice(fldlen - 4));
-                rowValue.typeCode = TypeCodeEx.String;
-                rowValue.stringValue = DateTypes.TimetzOutTimetzadt(timeSpanVal, timetzZone);
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMETZ, value={Value}", curField + 1, rowValue.stringValue);
-                break;
-            }
+                {
+                    TimeSpan timeSpanVal = DateTypes.TimeRecvFloatX2(fieldDataP);
+                    int timetzZone = BitConverter.ToInt32(fieldDataP.Slice(fldlen - 4));
+                    rowValue.typeCode = TypeCodeEx.String;
+                    rowValue.stringValue = DateTypes.TimetzOutTimetzadt(timeSpanVal, timetzZone);
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMETZ, value={Value}", curField + 1, rowValue.stringValue);
+                    break;
+                }
 
             case NzTypeTimestamp:
-            {
-                DateTime value = DateTypes.ToDateTimeFrom8Bytes(fieldDataP);
-                rowValue.typeCode = TypeCodeEx.DateTime;
-                rowValue.dateTimeValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMESTAMP, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    DateTime value = DateTypes.ToDateTimeFrom8Bytes(fieldDataP);
+                    rowValue.typeCode = TypeCodeEx.DateTime;
+                    rowValue.dateTimeValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=TIMESTAMP, value={Value}", curField + 1, value);
+                    break;
+                }
 
             case NzTypeNumeric:
-            {
-                DecodeNumericField(fieldDataP, curField, ref rowValue, logDebug);
-                break;
-            }
+                {
+                    DecodeNumericField(fieldDataP, curField, ref rowValue, logDebug);
+                    break;
+                }
 
             case NzTypeBool:
-            {
-                bool value = fieldDataP[0] == 0x01;
-                rowValue.typeCode = TypeCodeEx.Boolean;
-                rowValue.boolValue = value;
-                if (logDebug) _logger?.LogDebug("field={Field}, datatype=BOOL, value={Value}", curField + 1, value);
-                break;
-            }
+                {
+                    bool value = fieldDataP[0] == 0x01;
+                    rowValue.typeCode = TypeCodeEx.Boolean;
+                    rowValue.boolValue = value;
+                    if (logDebug) _logger?.LogDebug("field={Field}, datatype=BOOL, value={Value}", curField + 1, value);
+                    break;
+                }
         }
     }
 
@@ -4407,17 +4434,33 @@ public sealed class NzConnection : DbConnection
                         rowValue.stringValue = NzConnectionHelpers.IntervalRecvInteger(data, dataIdx, vlen - 4);
                         break;
                     case 1700: // NUMERIC
-                        try
                         {
-                            rowValue.typeCode = TypeCodeEx.Decimal;
-                            rowValue.decimalValue = NzConnectionHelpers.NumericInTyped(data, dataIdx, vlen - 4);
+                            var field = nzCommand.NewPreparedStatement.Description![columnNumber];
+                            int precision = field.TypeModifier > 16
+                                ? (field.TypeModifier - 16) >> 16
+                                : 0;
+                            // decimal has 29 significant digits at most. Parsing a
+                            // wider NUMERIC rounds silently, so keep the server's
+                            // exact text instead.
+                            if (precision > 28)
+                            {
+                                rowValue.typeCode = TypeCodeEx.String;
+                                rowValue.stringValue = Encoding.ASCII.GetString(data, dataIdx, vlen - 4);
+                                break;
+                            }
+
+                            try
+                            {
+                                rowValue.typeCode = TypeCodeEx.Decimal;
+                                rowValue.decimalValue = NzConnectionHelpers.NumericInTyped(data, dataIdx, vlen - 4);
+                            }
+                            catch (OverflowException)
+                            {
+                                rowValue.typeCode = TypeCodeEx.String;
+                                rowValue.stringValue = Encoding.ASCII.GetString(data, dataIdx, vlen - 4);
+                            }
+                            break;
                         }
-                        catch (OverflowException)
-                        {
-                            rowValue.typeCode = TypeCodeEx.String;
-                            rowValue.stringValue = Encoding.ASCII.GetString(data, dataIdx, vlen - 4);
-                        }
-                        break;
                     case 2275: // cstring
                         rowValue.typeCode = TypeCodeEx.String;
                         rowValue.stringValue = NzConnectionHelpers.TextRecv(data, dataIdx, vlen - 4, sp);
@@ -4494,7 +4537,7 @@ public sealed class NzConnection : DbConnection
         int count = HUnpack(data);
         int idx = 2;
 
-         nzCommand.NewPreparedStatement!.Description = new RowDescriptionMessage(count);
+        nzCommand.NewPreparedStatement!.Description = new RowDescriptionMessage(count);
 
         for (int i = 0; i < count; i++)
         {
@@ -4994,8 +5037,8 @@ public sealed class NetezzaException : DbException
 }
 public sealed class InterfaceException : DbException
 {
-    public InterfaceException(): base() { }
-    public InterfaceException( string msg) : base(msg) { }
+    public InterfaceException() : base() { }
+    public InterfaceException(string msg) : base(msg) { }
     public InterfaceException(string msg, Exception exception) : base(msg, exception) { }
 }
 

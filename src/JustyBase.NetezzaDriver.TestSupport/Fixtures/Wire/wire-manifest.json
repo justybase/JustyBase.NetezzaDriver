@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "appliance": "Release 11.2.2.1 [Build 20]",
+  "note": "Copies consumed by the C# test suite. Verify with WireFixtureManifestTests.",
+  "files": [
+    {
+      "name": "dbos_types.bin",
+      "sha256": "dcbb0d4499d07e0059acb8a6a3c577eb50710dc503ea6209fbc464a01a7fd1dc",
+      "bytes": 1552
+    },
+    {
+      "name": "ddl_reconstruction.bin",
+      "sha256": "c4198bdf4342cc906a486fd43fe5ce691e0279e4e2bfa6f380b913ea0b6aa488",
+      "bytes": 4921
+    },
+    {
+      "name": "error.bin",
+      "sha256": "b35d782c9bad42f5a9fe7a6c5f67ec0269b0e9f2e909d9989e40e05bd28be4cc",
+      "bytes": 330
+    },
+    {
+      "name": "error_details.bin",
+      "sha256": "06c85b7f74fd06153311915330f168ee29d5cd4aabf18fb2cd84073e6a4333d4",
+      "bytes": 443
+    },
+    {
+      "name": "latin_varchar.bin",
+      "sha256": "512f49ddecb4cf4245ea984eb44a46d09cb2abf8d556a6a2760976a23d990796",
+      "bytes": 877
+    },
+    {
+      "name": "metadata_core.bin",
+      "sha256": "44f81bb4dc85f6618d0cbe8e8997aea0b2ab7dca93e4be19f521cb787387c4ed",
+      "bytes": 14138
+    },
+    {
+      "name": "multi_result.bin",
+      "sha256": "5260c244b2cf35df8bb319a17bb735e3f8427574b462b77f2bb40959d943a0b2",
+      "bytes": 321
+    },
+    {
+      "name": "notice.bin",
+      "sha256": "07e97d0952411b7ca5f4406191c0c6e0688802c7ea7bee239e2d766487714609",
+      "bytes": 396
+    },
+    {
+      "name": "null_matrix.bin",
+      "sha256": "2e6ab914ec00515a54478cb6a1fa46e7008275ef78790131a6c2d667d51bfbc4",
+      "bytes": 4404
+    },
+    {
+      "name": "numeric_edges.bin",
+      "sha256": "3862d8f01c6a4f1f86e20bb08c911f6a50fbc6bbf023a5651d49e1b77ff89b73",
+      "bytes": 1225
+    },
+    {
+      "name": "numeric_matrix.bin",
+      "sha256": "3f327bf5f500f521c67570a7492f3ac58486d23d3ad0b0b8cfcf48cf3fc1aeb6",
+      "bytes": 5849
+    },
+    {
+      "name": "temporal_boundaries.bin",
+      "sha256": "ca72a35fd14dced9ce303e7a72029362ade3dc25ed428f108cdfba15314b8c9a",
+      "bytes": 1594
+    },
+    {
+      "name": "text_encoding.bin",
+      "sha256": "c990f55fb7c5989e805c5209c137c70892ae72e44631b8b8a29b5b2d8af4b6bc",
+      "bytes": 336
+    },
+    {
+      "name": "text_types.bin",
+      "sha256": "4d3a43e8a9bf3a464c2988abbea96121950a3dc33a045499d1b5db9d7dbadcd8",
+      "bytes": 606
+    },
+    {
+      "name": "varchar_32767.bin",
+      "sha256": "44d4f6fe35149fd02af5da235239e2a3797d9c15891f29390621a09f28c0c870",
+      "bytes": 197841
+    }
+  ]
+}

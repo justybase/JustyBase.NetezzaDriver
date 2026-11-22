@@ -13,6 +13,8 @@
 
   <ItemGroup>
     <None Include="Fixtures\**\*.nzreplay.gz" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Wire\*.bin" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Wire\wire-manifest.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

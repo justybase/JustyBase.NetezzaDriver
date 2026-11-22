@@ -1,4 +1,4 @@
-﻿using JustyBase.NetezzaDriver.StringPool;
+using JustyBase.NetezzaDriver.StringPool;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -21,13 +21,14 @@ internal sealed class RowDescriptionMessage
     {
         get => _fields[ordinal]!;
         set
-        { 
+        {
             _fields[ordinal] = value;
             _nameIndex[value.Name] = ordinal;
         }
     }
     public int FieldCount => _fields.Length;
-    public int FieldIndex(string name) => _nameIndex[name];
+    public int? FieldIndex(string name)
+        => _nameIndex.TryGetValue(name, out int index) ? index : null;
 }
 internal sealed class FieldDescription
 {
@@ -70,7 +71,12 @@ internal sealed class FieldDescription
         1184 => typeof(DateTime),//????
         //1186 => typeof(TimeSpan),
         1186 => typeof(string), // interval caanot be represented as TimeSpan -> lack of months..
-        1700 => typeof(decimal), // numeric
+        // Decimal holds at most 29 significant digits. Wider NUMERIC values
+        // are surfaced as exact strings by the row decoder, so the advertised
+        // field type must agree with the actual value.
+        1700 => TypeModifier > 16 && ((TypeModifier - 16) >> 16) > 28
+            ? typeof(string)
+            : typeof(decimal),
         2500 => typeof(Int16),// Byteint not SByte bocouse of ODBC compatibility.. (mailny for green test and compliance)
         2522 => typeof(string), // nchar
         2530 => typeof(string), // Nvarchar

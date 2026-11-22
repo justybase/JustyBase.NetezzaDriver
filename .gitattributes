@@ -1,7 +1,7 @@
 ###############################################################################
 # Set default behavior to automatically normalize line endings.
 ###############################################################################
-* text=auto
+* text=auto eol=lf
 
 ###############################################################################
 # Set default behavior for command prompt diff.
@@ -50,6 +50,7 @@
 ###############################################################################
 *.nzreplay.gz binary linguist-generated
 *.nzreplay binary linguist-generated
+src/JustyBase.NetezzaDriver.TestSupport/Fixtures/Wire/*.bin binary linguist-generated
 
 ###############################################################################
 # diff behavior for common document formats

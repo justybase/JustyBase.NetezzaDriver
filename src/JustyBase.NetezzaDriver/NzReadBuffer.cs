@@ -11,7 +11,7 @@ namespace JustyBase.NetezzaDriver;
 /// and allocation-free. Oversize payloads use temporary <see cref="ArrayPool{T}"/>
 /// buffers instead of permanently growing the connection buffer.
 /// </summary>
-internal sealed class NzReadBuffer
+internal sealed class NzReadBuffer : IDisposable
 {
     private readonly Stream _stream;
     private byte[] _buffer;

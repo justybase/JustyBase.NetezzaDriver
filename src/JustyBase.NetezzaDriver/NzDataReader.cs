@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.ObjectModel;
 using System.Data;
 using System.Data.Common;
@@ -82,7 +82,7 @@ public sealed class NzDataReader : DbDataReader
     public override bool Read()
     {
         // Fast path for common case
-        if(_disposed || !_opened || _needsToBeNextResultCalled)
+        if (_disposed || !_opened || _needsToBeNextResultCalled)
         {
             return false;
         }
@@ -455,7 +455,7 @@ public sealed class NzDataReader : DbDataReader
         ref readonly var rw = ref _nzCommand.GetValue(ordinal);
         if (rw.typeCode == TypeCodeEx.DBNull || rw.typeCode == TypeCodeEx.Empty)
             throw new InvalidCastException($"Cannot cast DBNull to string for column {ordinal}");
-        if(rw.typeCode != TypeCodeEx.String)
+        if (rw.typeCode != TypeCodeEx.String)
             throw new InvalidCastException($"Cannot cast column {ordinal} of type {rw.typeCode} to string");
         return rw.stringValue ?? string.Empty;
     }
@@ -463,6 +463,7 @@ public sealed class NzDataReader : DbDataReader
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public override object GetValue(int ordinal)
     {
+        ValidateCanRead();
         ValidateOrdinal(ordinal);
         return _nzCommand.GetValue(ordinal).GetValue();
     }
@@ -470,6 +471,7 @@ public sealed class NzDataReader : DbDataReader
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public override bool IsDBNull(int ordinal)
     {
+        ValidateCanRead();
         ValidateOrdinal(ordinal);
         return _nzCommand.IsDBNullFast(ordinal);
     }

@@ -16,7 +16,7 @@ internal static class ClientQueryPacket
         "select", "set", "insert", "update", "delete", "create", "drop", "alter",
         "show", "declare", "call", "with", "begin", "commit", "rollback", "explain",
         "grant", "revoke", "truncate", "values", "fetch", "prepare", "execute",
-        "using", "copy", "reset",
+        "using", "copy", "reset", "comment",
     ];
 
     /// <summary>
@@ -40,13 +40,14 @@ internal static class ClientQueryPacket
             while (j < count && span[j] != 0)
             {
                 byte c = span[j];
-                // Printable ASCII plus SQL whitespace (tab/newline/CR).
-                if (c != (byte)'\t' && c != (byte)'\n' && c != (byte)'\r' && (c < 0x20 || c > 0x7E))
+                // SQL is UTF-8: accept every non-control byte, including the
+                // multi-byte sequences used by literals such as 'Zażółć'.
+                if (c != (byte)'\t' && c != (byte)'\n' && c != (byte)'\r' && (c < 0x20 || c == 0x7F))
                     break;
                 j++;
             }
 
-            if (j < count && span[j] == 0 && j - sqlStart >= 8
+            if (j < count && span[j] == 0 && j - sqlStart >= 4
                 && StartsWithKeyword(span.Slice(sqlStart, j - sqlStart)))
             {
                 packetEnd = j + 1;
@@ -63,7 +64,7 @@ internal static class ClientQueryPacket
         while (wordEnd < sql.Length && sql[wordEnd] != (byte)' ')
             wordEnd++;
 
-        if (wordEnd == 0 || wordEnd >= sql.Length)
+        if (wordEnd == 0)
             return false;
 
         Span<char> word = stackalloc char[wordEnd];

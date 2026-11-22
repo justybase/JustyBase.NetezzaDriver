@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -19,7 +19,9 @@ internal static class DateTypes
         char tzSign = timetzZone < 0 ? '+' : '-';
 
         Span<char> chars = stackalloc char[32];
-        timeSpanVal.TryFormat(chars, out int written,"g", _invariantCulture);
+        string timeText = FormatClock(timeSpanVal);
+        timeText.AsSpan().CopyTo(chars);
+        int written = timeText.Length;
         chars[written] = tzSign;
         written++;
 
@@ -59,23 +61,76 @@ internal static class DateTypes
     internal static /*DateTime*/string TimeRecvFloatX1(ReadOnlySpan<byte> data)
     {
         long micros = BitConverter.ToInt64(data);
-        var ts = new TimeSpan(micros * TimeSpan.TicksPerMicrosecond);
         int months = BitConverter.ToInt32(data[8..]);
-        if (months == 0)
+        return FormatInterval(micros, months);
+    }
+
+    /// <summary>
+    /// Formats a Netezza interval exactly as the appliance prints it: separate
+    /// signed year/month and day/time components, six fractional digits with
+    /// trailing zeros removed. A plain <see cref="TimeSpan"/> string is not
+    /// sufficient because it collapses days into hours and loses the month
+    /// component entirely (the old code also dropped negative years).
+    /// </summary>
+    /// <summary>
+    /// Formats a time-of-day value with two-digit hours and up to seven
+    /// fractional digits (trailing zeros omitted). TimeSpan's general "g"
+    /// format emits a single-digit hour, which does not match the appliance.
+    /// </summary>
+    internal static string FormatClock(TimeSpan value)
+    {
+        string text = $"{value.Hours:D2}:{value.Minutes:D2}:{value.Seconds:D2}";
+        long fractionTicks = value.Ticks % TimeSpan.TicksPerSecond;
+        if (fractionTicks != 0)
         {
-            return string.Format(_invariantCulture, "{0}", ts);
+            text += "." + (fractionTicks / 10).ToString("D6", _invariantCulture).TrimEnd('0');
         }
-        else
+        return text;
+    }
+
+    internal static string FormatInterval(long micros, int months)
+    {
+        var parts = new List<string>(3);
+
+        int years = months / 12;
+        int remainingMonths = months % 12;
+        if (years != 0)
         {
-            int years = months / 12;
-            months %= 12;
-            if (years > 0)
+            parts.Add($"{years} {(Math.Abs(years) == 1 ? "year" : "years")}");
+        }
+        if (remainingMonths != 0)
+        {
+            parts.Add($"{remainingMonths} mons");
+        }
+
+        if (micros != 0)
+        {
+            bool negative = micros < 0;
+            long absolute = negative ? -micros : micros;
+            long days = absolute / 86_400_000_000L;
+            long remainder = absolute % 86_400_000_000L;
+            int hours = (int)(remainder / 3_600_000_000L);
+            remainder %= 3_600_000_000L;
+            int minutes = (int)(remainder / 60_000_000L);
+            remainder %= 60_000_000L;
+            int seconds = (int)(remainder / 1_000_000L);
+            int fractional = (int)(remainder % 1_000_000L);
+
+            string sign = negative ? "-" : string.Empty;
+            if (days != 0)
             {
-                return string.Format(_invariantCulture, "{0} years {1} mons {2}", years, months, ts);
+                parts.Add($"{sign}{days} {(days == 1 ? "day" : "days")}");
             }
 
-            return string.Format(_invariantCulture, "{0} mons {1}", months, ts);
+            string time = $"{sign}{hours:D2}:{minutes:D2}:{seconds:D2}";
+            if (fractional != 0)
+            {
+                time += "." + fractional.ToString("D6", _invariantCulture).TrimEnd('0');
+            }
+            parts.Add(time);
         }
+
+        return parts.Count == 0 ? "00:00:00" : string.Join(" ", parts);
     }
 
     /// <summary>
