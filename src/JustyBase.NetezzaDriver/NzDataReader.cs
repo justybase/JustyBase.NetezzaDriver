@@ -680,14 +680,12 @@ public sealed class NzDataReader : DbDataReader
         return toCopy;
     }
 
-    public override IEnumerator GetEnumerator()
-    {
-        // Return a simple enumerator that yields current row values
-        for (int i = 0; i < FieldCount; i++)
-        {
-            yield return GetValue(i);
-        }
-    }
+    /// <summary>
+    /// Returns an enumerator that iterates the rows of the reader, as required
+    /// by <see cref="DbDataReader"/>. Each item is the reader positioned on the
+    /// current row (an <see cref="System.Data.IDataRecord"/>).
+    /// </summary>
+    public override IEnumerator GetEnumerator() => new DbEnumerator(this, closeReader: false);
 
     public override string GetDataTypeName(int ordinal)
     {
@@ -883,10 +881,13 @@ public sealed class NzDataReader : DbDataReader
             return _schemaTable;
         }
 
+        var description = _nzCommand.NewPreparedStatement?.Description
+            ?? throw new InvalidOperationException("No result schema is available for this reader.");
+
         _schemaTable = new DataTable("Schema Table");
         _schemaTable.Columns.Add("ColumnName", typeof(string));
         _schemaTable.Columns.Add("ColumnOrdinal", typeof(int));
-        _schemaTable.Columns.Add("ColumnSize", typeof(Int16));
+        _schemaTable.Columns.Add("ColumnSize", typeof(int));
         _schemaTable.Columns.Add("NumericPrecision", typeof(int));
         _schemaTable.Columns.Add("NumericScale", typeof(int));
 #pragma warning disable IL2111 // Method with parameters or return value with `DynamicallyAccessedMembersAttribute` is accessed via reflection. Trimmer can't guarantee availability of the requirements of the method.
@@ -894,67 +895,55 @@ public sealed class NzDataReader : DbDataReader
 #pragma warning restore IL2111 // Method with parameters or return value with `DynamicallyAccessedMembersAttribute` is accessed via reflection. Trimmer can't guarantee availability of the requirements of the method.
         _schemaTable.Columns.Add("ProviderType", typeof(int));
         _schemaTable.Columns.Add("AllowDBNull", typeof(bool));
-
         _schemaTable.Columns.Add(new DataColumn("IsAutoIncrement", typeof(bool)) { DefaultValue = false });
-        _schemaTable.Columns.Add(new DataColumn("IsLong", typeof(bool)) { DefaultValue = false});
+        _schemaTable.Columns.Add(new DataColumn("IsLong", typeof(bool)) { DefaultValue = false });
         _schemaTable.Columns.Add(new DataColumn("IsReadOnly", typeof(bool)) { DefaultValue = false });
-
+        _schemaTable.Columns.Add(new DataColumn("IsKey", typeof(bool)) { DefaultValue = false });
+        _schemaTable.Columns.Add(new DataColumn("IsUnique", typeof(bool)) { DefaultValue = false });
+        _schemaTable.Columns.Add(new DataColumn("IsAliased", typeof(bool)) { DefaultValue = false });
+        _schemaTable.Columns.Add(new DataColumn("IsExpression", typeof(bool)) { DefaultValue = false });
+        _schemaTable.Columns.Add(new DataColumn("IsHidden", typeof(bool)) { DefaultValue = false });
+        _schemaTable.Columns.Add(new DataColumn("BaseCatalogName", typeof(string)) { DefaultValue = DBNull.Value });
+        _schemaTable.Columns.Add(new DataColumn("BaseSchemaName", typeof(string)) { DefaultValue = DBNull.Value });
+        _schemaTable.Columns.Add(new DataColumn("BaseTableName", typeof(string)) { DefaultValue = DBNull.Value });
+        _schemaTable.Columns.Add(new DataColumn("BaseColumnName", typeof(string)) { DefaultValue = DBNull.Value });
 
         for (int ordinal = 0; ordinal < FieldCount; ordinal++)
         {
-            var currentType = GetFieldType(ordinal);
-            var fieldSize = _nzConnection.CTableIFieldSizeAlternative(ordinal);
-            var allowDbNull = _nzConnection.IsColumnNullable(ordinal);
+            var field = description[ordinal];
+            var currentType = field.Type;
+            var isNumeric = field.TypeOID == 1700;
 
-            switch (currentType)
-            {
-                case Type t when t == typeof(decimal):
-                    _schemaTable.Rows.Add([
-                        _nzCommand.NewPreparedStatement!.Description![ordinal].Name
-                    , ordinal + 1
-                    , fieldSize
-                    , _nzConnection.CTableIFieldPrecisionAlternative(ordinal)
-                    , _nzConnection.CTableIFieldScaleAlternative(ordinal),
-                        currentType, _nzCommand.NewPreparedStatement!.Description![ordinal].TypeOID, allowDbNull]);
-                    break;
-                case Type t when t == typeof(string):
-                    _schemaTable.Rows.Add([_nzCommand.NewPreparedStatement!.Description![ordinal].Name
-                        , ordinal + 1
-                        , fieldSize
-                        , -1
-                        , -1
-                        , currentType, _nzCommand.NewPreparedStatement!.Description![ordinal].TypeOID, allowDbNull]);
-                    break;
-                case Type t when t == typeof(DateTime):
-                    _schemaTable.Rows.Add([_nzCommand.NewPreparedStatement!.Description![ordinal].Name
-                        , ordinal + 1
-                        , fieldSize
-                        , -1
-                        , -1
-                        , currentType, _nzCommand.NewPreparedStatement!.Description![ordinal].TypeOID, allowDbNull]);
-                    break;
-                case Type t when t == typeof(TimeSpan):
-                    _schemaTable.Rows.Add([_nzCommand.NewPreparedStatement!.Description![ordinal].Name
-                        , ordinal + 1
-                        , fieldSize
-                        , -1
-                        , -1
-                        , currentType, _nzCommand.NewPreparedStatement!.Description![ordinal].TypeOID, allowDbNull]);
-                    break;
-                default:
-                    _schemaTable.Rows.Add([_nzCommand.NewPreparedStatement!.Description![ordinal].Name
-                        , ordinal + 1
-                        , fieldSize
-                        , -1
-                        , -1
-                        , currentType, _nzCommand.NewPreparedStatement!.Description![ordinal].TypeOID, allowDbNull]);
-                    break;
-            };
+            var row = _schemaTable.NewRow();
+            row["ColumnName"] = field.Name;
+            // ADO.NET uses zero-based ordinals.
+            row["ColumnOrdinal"] = ordinal;
+            row["ColumnSize"] = _nzConnection.CTableIFieldSizeAlternative(ordinal);
+            row["NumericPrecision"] = isNumeric ? (GetNumericPrecision(ordinal, field) ?? -1) : -1;
+            row["NumericScale"] = isNumeric ? (GetNumericScale(ordinal, field) ?? -1) : -1;
+            row["DataType"] = currentType;
+            row["ProviderType"] = (int)field.TypeOID;
+            row["AllowDBNull"] = _nzConnection.IsColumnNullable(ordinal);
+            row["BaseColumnName"] = field.Name;
+            _schemaTable.Rows.Add(row);
         }
 
         return _schemaTable;
     }
 
+    /// <summary>
+    /// Async counterpart required by <see cref="DbDataReaderExtensions.GetColumnSchema(DbDataReader)"/>.
+    /// </summary>
+    public override Task<ReadOnlyCollection<DbColumn>> GetColumnSchemaAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(GetColumnSchema());
+    }
+
+    /// <summary>
+    /// Returns the column schema. Also reachable through the standard
+    /// <see cref="DbDataReaderExtensions.GetColumnSchema(DbDataReader)"/> extension.
+    /// </summary>
     public ReadOnlyCollection<DbColumn> GetColumnSchema()
     {
         ThrowIfDisposed();

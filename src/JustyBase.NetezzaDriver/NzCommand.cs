@@ -79,6 +79,17 @@ public sealed class NzCommand : DbCommand
         return typeCode == TypeCodeEx.DBNull || typeCode == TypeCodeEx.Empty;
     }
 
+    /// <summary>
+    /// Creates a command that is not yet bound to a connection. Intended for
+    /// <see cref="DbProviderFactory.CreateCommand"/>; assign
+    /// <see cref="DbCommand.Connection"/> before execution.
+    /// </summary>
+    public NzCommand()
+    {
+        _noticesView = _notices.AsReadOnly();
+        _connection = null!;
+    }
+
     public NzCommand(NzConnection connection)
     {
         _noticesView = _notices.AsReadOnly();
@@ -89,10 +100,25 @@ public sealed class NzCommand : DbCommand
     {
         _noticesView = _notices.AsReadOnly();
         _connection = connection;
+        connection.SetNzCommand(this);
         CommandText = sql;
     }
 
     private NzConnection _connection;
+
+    private const int DefaultCommandTimeoutSeconds = 60;
+    private int _commandTimeout = -1;
+
+    /// <summary>
+    /// The effective timeout for this command: the per-command value when set,
+    /// otherwise the connection default captured at execution time.
+    /// </summary>
+    internal TimeSpan EffectiveCommandTimeout
+        => _commandTimeout >= 0
+            ? TimeSpan.FromSeconds(_commandTimeout)
+            : _connection is null
+                ? TimeSpan.FromSeconds(DefaultCommandTimeoutSeconds)
+                : _connection.CommandTimeout;
     private readonly NzParameterCollection _parameters = [];
     private string? _cachedParamSql;
     private NzParameterHelper.SqlTemplatePlan? _cachedParamPlan;
@@ -278,10 +304,19 @@ public sealed class NzCommand : DbCommand
     public override string CommandText { get; set; } = string.Empty;
     public override int CommandTimeout
     {
-        get => (int)_connection!.CommandTimeout.TotalSeconds;
+        get => _commandTimeout >= 0
+            ? _commandTimeout
+            : _connection is null
+                ? DefaultCommandTimeoutSeconds
+                : (int)_connection.CommandTimeout.TotalSeconds;
         set
         {
-            _connection!.CommandTimeout = TimeSpan.FromSeconds(value);
+            if (value < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), "CommandTimeout cannot be negative.");
+            }
+
+            _commandTimeout = value;
         }
     }
     public override CommandType CommandType
@@ -299,7 +334,11 @@ public sealed class NzCommand : DbCommand
     protected override DbConnection? DbConnection 
     {
         get => _connection;
-        set => _connection = (NzConnection)value!;
+        set
+        {
+            _connection = (NzConnection)value!;
+            _connection?.SetNzCommand(this);
+        }
     }
 
     protected override DbParameterCollection DbParameterCollection => _parameters;

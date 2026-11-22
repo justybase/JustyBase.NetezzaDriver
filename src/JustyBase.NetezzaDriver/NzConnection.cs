@@ -8,6 +8,7 @@ using System.Buffers.Binary;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -57,11 +58,11 @@ public sealed class NzConnection : DbConnection
     public int Pid => _backendKeyData?.BackendProcessId ?? -1;
 
     private string _database;
-    private readonly string _user;
-    private readonly string _password;
-    private readonly string _host;
-    private readonly int _port;
-    private readonly bool _bulkInsertEnabled = true;
+    private string _user;
+    private string _password;
+    private string _host;
+    private int _port;
+    private bool _bulkInsertEnabled = true;
 
     public DateTime CreatedAt { get; internal set; } = DateTime.UtcNow;
 
@@ -99,6 +100,21 @@ public sealed class NzConnection : DbConnection
     public const int NzTypeJsonpath = 32;
     public const int NzTypeLastEntry = 33;
     public const int NzTypeIntvsAbsTimeFIX = 39;//https://github.com/IBM/nzpy/issues/61
+
+    /// <summary>
+    /// Creates an unconfigured connection. Intended for
+    /// <see cref="DbProviderFactory.CreateConnection"/>; assign
+    /// <see cref="ConnectionString"/> before opening.
+    /// </summary>
+    public NzConnection()
+    {
+        _database = string.Empty;
+        _user = string.Empty;
+        _password = string.Empty;
+        _host = string.Empty;
+        _port = 5480;
+        _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
+    }
 
     public NzConnection(string user, string password, string host, string database,
         int port = 5480, SecurityLevelCode securityLevel = SecurityLevelCode.PreferredUnsecured, string? sslCerFilePath = null, ILoggerFactory? loggerFactory = null)
@@ -167,119 +183,59 @@ public sealed class NzConnection : DbConnection
     /// <exception cref="NetezzaException">Thrown when mandatory parameters are missing or format is invalid</exception>
     internal static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime, int ConnectionValidationInterval, bool BulkInsert) ParseConnectionString(string connectionString)
     {
-        var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        int position = 0;
-
-        while (position < connectionString.Length)
+        NzConnectionStringBuilder builder;
+        try
         {
-            // Skip whitespace
-            while (position < connectionString.Length && char.IsWhiteSpace(connectionString[position]))
-                position++;
-
-            // Find key
-            int keyStart = position;
-            while (position < connectionString.Length && connectionString[position] != '=')
-                position++;
-
-            if (position >= connectionString.Length)
-                break;
-
-            string key = connectionString[keyStart..position].Trim();
-            position++; // Skip '='
-
-            // Handle value
-            string value;
-            if (position < connectionString.Length && connectionString[position] == '{')
-            {
-                // Handle curly brace enclosed value (for passwords with semicolons)
-                int braceStart = position + 1;
-                position = connectionString.IndexOf('}', braceStart);
-
-                if (position == -1)
-                    throw new NetezzaException("Unterminated curly brace in connection string");
-
-                value = connectionString[braceStart..position];
-                position++; // Skip closing brace
-
-                // Skip to next parameter
-                while (position < connectionString.Length && connectionString[position] != ';')
-                    position++;
-            }
-            else
-            {
-                // Handle regular value
-                int valueStart = position;
-                while (position < connectionString.Length && connectionString[position] != ';')
-                    position++;
-
-                value = connectionString[valueStart..position].Trim();
-            }
-
-            if (key.Length > 0)
-            {
-                parameters[key] = value;
-            }
-
-            position++; // Skip semicolon
+            builder = new NzConnectionStringBuilder(connectionString);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException)
+        {
+            throw new NetezzaException($"Invalid connection string: {ex.Message}", ex);
         }
 
-        // Extract mandatory parameters
-        if (!parameters.TryGetValue("User", out var user) && !parameters.TryGetValue("Username", out user))
-        {
+        if (!builder.ContainsKey("User") && !builder.ContainsKey("Username"))
             throw new NetezzaException("Username is required in connection string");
-        }
 
-        if (!parameters.TryGetValue("Password", out var password) && !parameters.TryGetValue("Pwd", out password))
-        {
+        if (!builder.ContainsKey("Password") && !builder.ContainsKey("Pwd"))
             throw new NetezzaException("Password is required in connection string");
-        }
 
-        if (!parameters.TryGetValue("Host", out var host) && !parameters.TryGetValue("Server", out host))
-        {
+        if (!builder.ContainsKey("Host") && !builder.ContainsKey("Server"))
             throw new NetezzaException("Host is required in connection string");
-        }
 
-        // Extract optional parameters
-        parameters.TryGetValue("Database", out var database);
+        string? database = builder.TryGetValue("Database", out var rawDatabase)
+            ? Convert.ToString(rawDatabase, CultureInfo.InvariantCulture)
+            : null;
 
-        int? port = null;
-        if (parameters.TryGetValue("Port", out var portStr) && int.TryParse(portStr, out var parsedPort))
-        {
-            port = parsedPort;
-        }
+        int? port = builder.TryGetValue("Port", out _) ? builder.Port : null;
+        int? timeout = builder.TryGetValue("Timeout", out _) ? builder.Timeout : null;
+        bool pooling = !builder.TryGetValue("Pooling", out _) || builder.Pooling;
+        int minPoolSize = builder.TryGetValue("MinPoolSize", out _) ? builder.MinPoolSize : 0;
+        int maxPoolSize = builder.TryGetValue("MaxPoolSize", out _) ? builder.MaxPoolSize : 10;
+        int connectionIdleTimeout = builder.TryGetValue("ConnectionIdleTimeout", out _) ? builder.ConnectionIdleTimeout : 30;
+        int connectionLifetime = builder.TryGetValue("ConnectionLifetime", out _) ? builder.ConnectionLifetime : 0;
+        int connectionValidationInterval = builder.TryGetValue("ConnectionValidationInterval", out _)
+            ? builder.ConnectionValidationInterval
+            : NzConnectionStringBuilder.DefaultConnectionValidationInterval;
+        bool bulkInsert = !builder.TryGetValue("BulkInsert", out _) || builder.BulkInsert;
 
-        int? timeout = null;
-        if (parameters.TryGetValue("Timeout", out var timeoutStr) && int.TryParse(timeoutStr, out var parsedTimeout))
-        {
-            timeout = parsedTimeout;
-        }
-
-        bool pooling = !parameters.TryGetValue("Pooling", out var poolingStr) || bool.Parse(poolingStr);
-        int minPoolSize = 0;
-        if (parameters.TryGetValue("MinPoolSize", out var minPoolStr))
-            int.TryParse(minPoolStr, out minPoolSize);
-        int maxPoolSize = 10;
-        if (parameters.TryGetValue("MaxPoolSize", out var maxPoolStr))
-            int.TryParse(maxPoolStr, out maxPoolSize);
-        int connectionIdleTimeout = 30;
-        if (parameters.TryGetValue("ConnectionIdleTimeout", out var idleStr))
-            int.TryParse(idleStr, out connectionIdleTimeout);
-        int connectionLifetime = 0;
-        if (parameters.TryGetValue("ConnectionLifetime", out var lifetimeStr))
-            int.TryParse(lifetimeStr, out connectionLifetime);
-        int connectionValidationInterval = NzConnectionStringBuilder.DefaultConnectionValidationInterval;
-        if (parameters.TryGetValue("ConnectionValidationInterval", out var validationStr)
-            && int.TryParse(validationStr, out var parsedValidation))
-            connectionValidationInterval = parsedValidation;
-
-        bool bulkInsert = !parameters.TryGetValue("BulkInsert", out var bulkInsertStr)
-            || bool.Parse(bulkInsertStr);
-
-        return (user, password, host, database, port, timeout, pooling, minPoolSize, maxPoolSize, connectionIdleTimeout, connectionLifetime, connectionValidationInterval, bulkInsert);
+        return (
+            builder.UserName,
+            builder.Password,
+            builder.Host,
+            database,
+            port,
+            timeout,
+            pooling,
+            minPoolSize,
+            maxPoolSize,
+            connectionIdleTimeout,
+            connectionLifetime,
+            connectionValidationInterval,
+            bulkInsert);
     }
 
 
-    public TimeSpan ConnectionTimeoutDuration { get; init; } =  TimeSpan.FromSeconds(15);
+    public TimeSpan ConnectionTimeoutDuration { get; set; } =  TimeSpan.FromSeconds(15);
 
     public override int ConnectionTimeout => (int)ConnectionTimeoutDuration.TotalSeconds;
 
@@ -1265,7 +1221,30 @@ public sealed class NzConnection : DbConnection
             LoggerFactory= _loggerFactory,
             BulkInsert = _bulkInsertEnabled
         }.ConnectionString;
-        set => throw new NotSupportedException("Setting ConnectionString is not supported. Create a new NzConnection instance.");
+        set
+        {
+            if (State != ConnectionState.Closed)
+            {
+                throw new InvalidOperationException(
+                    "The ConnectionString property cannot be set while the connection is open.");
+            }
+
+            ApplyConnectionString(value ?? string.Empty);
+        }
+    }
+
+    private void ApplyConnectionString(string connectionString)
+    {
+        var parameters = ParseConnectionString(connectionString);
+        _database = parameters.Database ?? string.Empty;
+        _user = parameters.User;
+        _password = parameters.Password;
+        _host = parameters.Host;
+        _port = parameters.Port ?? 5480;
+        _bulkInsertEnabled = parameters.BulkInsert;
+        ConnectionTimeoutDuration = parameters.Timeout.HasValue
+            ? TimeSpan.FromSeconds(parameters.Timeout.Value)
+            : TimeSpan.FromSeconds(15);
     }
 
     public string SafeConnectionString => new NzConnectionStringBuilder()
@@ -1309,9 +1288,9 @@ public sealed class NzConnection : DbConnection
         }
     }
 
-    private void HandleTimeout()
+    private void HandleTimeout(TimeSpan timeout)
     {
-        double microsToWait = CommandTimeout.TotalMicroseconds;
+        double microsToWait = timeout.TotalMicroseconds;
         bool pollresult = true;
         while (microsToWait > 0.5)
         {
@@ -1346,9 +1325,8 @@ public sealed class NzConnection : DbConnection
     /// block for the whole socket receive timeout. The timer cancels the query
     /// at the command deadline while the normal read loop drains the response.
     /// </summary>
-    private Timer? StartCommandTimeoutTimer()
+    private Timer? StartCommandTimeoutTimer(TimeSpan timeout)
     {
-        var timeout = CommandTimeout;
         if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
         {
             return null;
@@ -1382,12 +1360,13 @@ public sealed class NzConnection : DbConnection
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool TryGetCommandTimeoutToken(
+        TimeSpan timeout,
         CancellationToken callerToken,
         out CancellationToken effectiveToken,
         out CancellationTokenSource? linkedToDispose,
         out CancellationTokenSource? timeoutSource)
     {
-        if (CommandTimeout <= TimeSpan.Zero || CommandTimeout == Timeout.InfiniteTimeSpan)
+        if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan)
         {
             effectiveToken = callerToken;
             linkedToDispose = null;
@@ -1415,7 +1394,7 @@ public sealed class NzConnection : DbConnection
                 cached = new CancellationTokenSource();
                 _cachedTimeoutCts = cached;
             }
-            cached.CancelAfter(CommandTimeout);
+            cached.CancelAfter(timeout);
             effectiveToken = cached.Token;
             linkedToDispose = null;
             timeoutSource = cached;
@@ -1423,7 +1402,7 @@ public sealed class NzConnection : DbConnection
         }
 
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
-        linkedCts.CancelAfter(CommandTimeout);
+        linkedCts.CancelAfter(timeout);
         effectiveToken = linkedCts.Token;
         linkedToDispose = linkedCts;
         timeoutSource = linkedCts;
@@ -1440,7 +1419,7 @@ public sealed class NzConnection : DbConnection
         PreExecution(nzCommand, query);
         _nextRelatedFileStream = null!;
 
-        using var timeoutTimer = StartCommandTimeoutTimer();
+        using var timeoutTimer = StartCommandTimeoutTimer(nzCommand.EffectiveCommandTimeout);
         while (DoNextStep(nzCommand)) ;
         timeoutTimer?.Change(Timeout.Infinite, Timeout.Infinite);
 
@@ -1457,7 +1436,7 @@ public sealed class NzConnection : DbConnection
     public async Task<bool> ExecuteAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        TryGetCommandTimeoutToken(cancellationToken, out var effectiveCancellationToken, out var linkedCts, out var timeoutSource);
+        TryGetCommandTimeoutToken(nzCommand.EffectiveCommandTimeout, cancellationToken, out var effectiveCancellationToken, out var linkedCts, out var timeoutSource);
         using (linkedCts)
         {
             try
@@ -1558,7 +1537,7 @@ public sealed class NzConnection : DbConnection
     public NzDataReader ExecuteReader(NzCommand nzCommand, string query)
     {
         PreExecution(nzCommand, query);
-        HandleTimeout();
+        HandleTimeout(nzCommand.EffectiveCommandTimeout);
         _nextRelatedFileStream = null!;
         var rdr =  new NzDataReader(nzCommand);
         if (_error != null)
@@ -1571,7 +1550,7 @@ public sealed class NzConnection : DbConnection
     public async Task<NzDataReader> ExecuteReaderAsync(NzCommand nzCommand, string query, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        TryGetCommandTimeoutToken(cancellationToken, out var effectiveCancellationToken, out var linkedCts, out var timeoutSource);
+        TryGetCommandTimeoutToken(nzCommand.EffectiveCommandTimeout, cancellationToken, out var effectiveCancellationToken, out var linkedCts, out var timeoutSource);
         using (linkedCts)
         {
             try

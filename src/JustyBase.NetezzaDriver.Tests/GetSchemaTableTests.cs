@@ -34,7 +34,7 @@ public class GetSchemaTableTests
         // Verify column types
         Assert.Equal(typeof(string), schemaTable.Columns["ColumnName"]!.DataType);
         Assert.Equal(typeof(int), schemaTable.Columns["ColumnOrdinal"]!.DataType);
-        Assert.Equal(typeof(Int16), schemaTable.Columns["ColumnSize"]!.DataType);
+        Assert.Equal(typeof(int), schemaTable.Columns["ColumnSize"]!.DataType);
         Assert.Equal(typeof(int), schemaTable.Columns["NumericPrecision"]!.DataType);
         Assert.Equal(typeof(int), schemaTable.Columns["NumericScale"]!.DataType);
         Assert.Equal(typeof(Type), schemaTable.Columns["DataType"]!.DataType);
@@ -44,10 +44,10 @@ public class GetSchemaTableTests
         // Verify numeric column metadata
         var numericRow = schemaTable.Rows[3];
         Assert.Equal("NUMERIC_COL", numericRow["ColumnName"]);
-        Assert.Equal(4, numericRow["ColumnOrdinal"]);
+        Assert.Equal(3, numericRow["ColumnOrdinal"]);
         Assert.Equal<int>(10, (int)numericRow["NumericPrecision"]);
         Assert.Equal<int>(2, (int)numericRow["NumericScale"]);
-        Assert.Equal<Int16>(19, (Int16)numericRow["ColumnSize"]);
+        Assert.Equal(19, (int)numericRow["ColumnSize"]);
     }
 
     [Fact]
@@ -123,12 +123,12 @@ public class GetSchemaTableTests
         {
             var row = schemaTable.Rows[i];
             var expectedSize = expectedSizes[i];
-            var actualSize = (Int16)row["ColumnSize"];
+            var actualSize = (int)row["ColumnSize"];
             var columnName = (string)row["ColumnName"];
 
             Assert.Equal($"COL_{i + 1}", columnName);
-            Assert.Equal((Int16)expectedSize, actualSize);
-            Assert.Equal(i + 1, (int)row["ColumnOrdinal"]);
+            Assert.Equal(expectedSize, actualSize);
+            Assert.Equal(i, (int)row["ColumnOrdinal"]);
             Assert.Equal(typeof(string), row["DataType"]);
             Assert.True((bool)row["AllowDBNull"]);
         }
@@ -151,10 +151,10 @@ public class GetSchemaTableTests
 
         var row = schemaTable.Rows[0];
         Assert.Equal("NUMERIC_COL", row["ColumnName"]);
-        Assert.Equal(1, row["ColumnOrdinal"]);
+        Assert.Equal(0, row["ColumnOrdinal"]);
         Assert.Equal<int>(15, (int)row["NumericPrecision"]);
         Assert.Equal<int>(5, (int)row["NumericScale"]);
-        Assert.True(row["ColumnSize"] is Int16);
+        Assert.True(row["ColumnSize"] is int);
         Assert.True(row["ProviderType"] is int);
         Assert.True(row["AllowDBNull"] is bool);
     }
@@ -180,17 +180,17 @@ public class GetSchemaTableTests
         // Check CHAR(10)
         var fixedCharRow = schemaTable.Rows[0];
         Assert.Equal("FIXED_CHAR", fixedCharRow["ColumnName"]);
-        Assert.Equal<short>((short)10, (short)fixedCharRow["ColumnSize"]);
+        Assert.Equal(10, (int)fixedCharRow["ColumnSize"]);
 
         // Check VARCHAR(100)
         var varCharRow = schemaTable.Rows[1];
         Assert.Equal("VAR_CHAR", varCharRow["ColumnName"]);
-        Assert.Equal<short>(100, (short)varCharRow["ColumnSize"]);
+        Assert.Equal(100, (int)varCharRow["ColumnSize"]);
 
         // Check TEXT (should have max size or -1)
         var textRow = schemaTable.Rows[2];
         Assert.Equal("TEXT_COL", textRow["ColumnName"]);
-        Assert.True((Int16)textRow["ColumnSize"] == -1 || (Int16)textRow["ColumnSize"] > 0);
+        Assert.True((int)textRow["ColumnSize"] == -1 || (int)textRow["ColumnSize"] > 0);
     }
 
     [Fact]
@@ -218,7 +218,7 @@ public class GetSchemaTableTests
                     var columnOrdinal = (int)(st!.Rows[0]["ColumnOrdinal"]);
 
                     Assert.Equal("COL_XYZ", columnName);
-                    Assert.Equal(1, columnOrdinal);
+                    Assert.Equal(0, columnOrdinal);
 
                     //Debug.WriteLine($"{connection.TypeModifierBinary(0)} NUMERIC({precision},{scale})");
                     Assert.Equal(scale, numericScale);
@@ -273,13 +273,13 @@ public class GetSchemaTableTests
         var stringRow = schemaTable.Rows[1];
         Assert.Equal("COMPUTED_STRING", stringRow["ColumnName"]);
         Assert.Equal(typeof(string), stringRow["DataType"]);
-        Assert.Equal<Int16>(5, (Int16)stringRow["ColumnSize"]); // SUBSTRING length
+        Assert.Equal(5, (int)stringRow["ColumnSize"]); // SUBSTRING length
 
         // Verify computed CASE column
         var caseRow = schemaTable.Rows[2];
         Assert.Equal("COMPUTED_CASE", caseRow["ColumnName"]);
         Assert.Equal(typeof(string), caseRow["DataType"]);
-        Assert.Equal<Int16>(1, (Int16)caseRow["ColumnSize"]); // Y or N
+        Assert.Equal(1, (int)caseRow["ColumnSize"]); // Y or N
 
         // Verify window function column
         var windowRow = schemaTable.Rows[3];

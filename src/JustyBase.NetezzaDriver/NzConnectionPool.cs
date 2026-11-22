@@ -465,15 +465,12 @@ public sealed class NzConnectionPool : IAsyncDisposable
             return false;
 
         Interlocked.Increment(ref _connectionValidationCount);
-        // NzCommand.CommandTimeout currently forwards to the shared
-        // NzConnection.CommandTimeout, so save/restore around the probe.
-        // Otherwise validation would permanently change the application's
-        // timeout on the physical connection.
-        var originalTimeout = connection.CommandTimeout;
         try
         {
             await using var cmd = connection.CreateCommand();
             cmd.CommandText = "SELECT 1";
+            // CommandTimeout is per-command; the probe cannot leak its
+            // shorter timeout to the application's connection default.
             cmd.CommandTimeout = ValidationTimeoutSeconds;
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             return await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -485,10 +482,6 @@ public sealed class NzConnectionPool : IAsyncDisposable
         catch
         {
             return false;
-        }
-        finally
-        {
-            connection.CommandTimeout = originalTimeout;
         }
     }
 

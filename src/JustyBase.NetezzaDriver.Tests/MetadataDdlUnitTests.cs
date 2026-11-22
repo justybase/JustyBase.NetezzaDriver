@@ -1,5 +1,6 @@
 namespace JustyBase.NetezzaDriver.Tests;
 
+[Trait("Category", "Unit")]
 public class MetadataDdlUnitTests
 {
     [Fact]
