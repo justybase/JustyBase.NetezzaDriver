@@ -1,4 +1,4 @@
-﻿using JustyBase.NetezzaDriver.StringPool;
+using JustyBase.NetezzaDriver.StringPool;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -15,7 +15,7 @@ internal static class NzConnectionHelpers
         if (length + offset > data.Length)
         {
             length = data.Length - offset;
-        Debug.Assert(false);
+            Debug.Assert(false);
         }
 
         if (sp is not null)

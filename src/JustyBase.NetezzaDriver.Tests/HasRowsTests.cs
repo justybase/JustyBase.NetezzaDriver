@@ -1,4 +1,4 @@
-﻿namespace JustyBase.NetezzaDriver.Tests;
+namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
 [Trait("Category", "Integration")]
@@ -6,7 +6,7 @@ public class HasRowsTests
 {
 
     [Theory]
-    [InlineData("SELECT 1 FROM JUST_DATA..DIMDATE LIMIT 1;SELECT 2 FROM JUST_DATA..DIMDATE LIMIT 1","2")]
+    [InlineData("SELECT 1 FROM JUST_DATA..DIMDATE LIMIT 1;SELECT 2 FROM JUST_DATA..DIMDATE LIMIT 1", "2")]
     [InlineData("SELECT 1,2;SELECT 2,3; SELECT 3,4; SELECT 4,5", "4")]
     public void ManyResults(string value1, string expected)
     {
@@ -46,7 +46,7 @@ public class HasRowsTests
                            "SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY DD ORDER BY ROWID LIMIT 1;" +
                            "SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY DD ORDER BY ROWID LIMIT 0;" +
                            "SELECT * FROM JUST_DATA..FACTPRODUCTINVENTORY DD ORDER BY ROWID LIMIT 1;";
-        Assert.Equal([false,true,false,true], Helper(query));
+        Assert.Equal([false, true, false, true], Helper(query));
     }
 
     [Fact]

@@ -1,0 +1,89 @@
+{
+  "kit_version": 1,
+  "category": "handshake",
+  "cases": [
+    {
+      "id": "handshake.tls_refusal_fail_closed",
+      "profile": "handshake",
+      "description": "OnlySecuredSession fails when the server refuses the TLS negotiation",
+      "api": {
+        "operation": "handshake_tls_refusal"
+      },
+      "expect": {
+        "error": {
+          "class": "connection"
+        }
+      },
+      "known_divergences": {
+        "python": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        },
+        "node": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        },
+        "rust": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        }
+      }
+    },
+    {
+      "id": "handshake.unsupported_auth_fail_closed",
+      "profile": "handshake",
+      "description": "An unsupported authentication request fails instead of continuing the handshake",
+      "api": {
+        "operation": "handshake_unsupported_auth",
+        "auth_code": 2
+      },
+      "expect": {
+        "error": {
+          "class": "connection"
+        }
+      },
+      "known_divergences": {
+        "python": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        },
+        "node": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        },
+        "rust": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        }
+      }
+    },
+    {
+      "id": "handshake.invalid_version_fail_closed",
+      "profile": "handshake",
+      "description": "A non-downgrading handshake version is rejected instead of looping forever",
+      "api": {
+        "operation": "handshake_invalid_version",
+        "requested_version": 54
+      },
+      "expect": {
+        "error": {
+          "class": "connection"
+        }
+      },
+      "known_divergences": {
+        "python": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        },
+        "node": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        },
+        "rust": {
+          "reason": "requires the C# in-process scripted handshake server",
+          "expires": "2027-12-31"
+        }
+      }
+    }
+  ]
+}

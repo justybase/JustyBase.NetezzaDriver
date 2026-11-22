@@ -1,4 +1,4 @@
-﻿namespace JustyBase.NetezzaDriver;
+namespace JustyBase.NetezzaDriver;
 
 /// <summary>
 /// Represents a prepared SQL statement.

@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using System.ComponentModel;
 using System.Data.Common;
 using System.Globalization;

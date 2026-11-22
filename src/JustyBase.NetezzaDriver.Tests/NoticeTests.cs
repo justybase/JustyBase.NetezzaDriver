@@ -1,4 +1,4 @@
-﻿namespace JustyBase.NetezzaDriver.Tests;
+namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
 [Trait("Category", "Integration")]
@@ -20,7 +20,7 @@ public class NoticeTests
         connection.Open();
         using var command = connection.CreateCommand("CALL CUSTOMER_DOTNET();");
         List<string> notices = new List<string>();
-        connection.NoticeReceived += (o,e) =>
+        connection.NoticeReceived += (o, e) =>
         {
             notices.Add(e.Message);
         };

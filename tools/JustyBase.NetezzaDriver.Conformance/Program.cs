@@ -1,9 +1,9 @@
+using JustyBase.NetezzaDriver;
+using JustyBase.NetezzaDriver.TestSupport;
 using System.Data.Common;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using JustyBase.NetezzaDriver;
-using JustyBase.NetezzaDriver.TestSupport;
 
 namespace JustyBase.NetezzaDriver.Conformance;
 
@@ -63,6 +63,7 @@ internal static class Program
         var casesDir = string.Empty;
         string? output = null;
         var failFast = false;
+        var offline = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -73,6 +74,7 @@ internal static class Program
                 case "--cases-dir": casesDir = args[++i]; break;
                 case "--out": output = args[++i]; break;
                 case "--fail-fast": failFast = true; break;
+                case "--offline": offline = true; break;
                 default:
                     Console.Error.WriteLine($"csharp runner: unknown argument {args[i]}");
                     return 2;
@@ -91,8 +93,21 @@ internal static class Program
             casesDir = Path.GetFullPath(casesDir);
         }
 
-        var settings = LoadSettings();
-        if (settings is null) return 2;
+        Settings? settings = null;
+        NzConnection? connection = null;
+        if (!offline)
+        {
+            settings = LoadSettings();
+            if (settings is null) return 2;
+
+            connection = new NzConnection(
+                settings.User,
+                settings.Password,
+                settings.Host,
+                settings.Database,
+                settings.Port);
+            await connection.OpenAsync();
+        }
 
         var cases = LoadCases(casesDir)
             .Where(item => filters.Count == 0
@@ -107,38 +122,53 @@ internal static class Program
             return 2;
         }
 
-        await using var connection = new NzConnection(
-            settings.User,
-            settings.Password,
-            settings.Host,
-            settings.Database,
-            settings.Port);
-        await connection.OpenAsync();
-
-        await using var writer = output is null
-            ? Console.Out
-            : new StreamWriter(output, false, new UTF8Encoding(false));
-
-        var failures = 0;
-        foreach (var item in cases)
+        try
         {
-            var result = item.Api is null
-                ? await ExecuteCaseAsync(connection, settings, item)
-                : await ExecuteApiCaseAsync(connection, settings, item);
-            await writer.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
-            await writer.FlushAsync();
-            if (result.Status != "pass")
+            await using var writer = output is null
+                ? Console.Out
+                : new StreamWriter(output, false, new UTF8Encoding(false));
+
+            var failures = 0;
+            foreach (var item in cases)
             {
-                Console.Error.WriteLine($"{result.Status,-5} {item.Id} ({result.DurationMs} ms)");
+                if (offline && !IsOfflineCase(item))
+                {
+                    var skipped = new CaseResult
+                    {
+                        CaseId = item.Id,
+                        Profile = item.Profile,
+                        Status = "skip",
+                    };
+                    await writer.WriteLineAsync(JsonSerializer.Serialize(skipped, JsonOptions));
+                    await writer.FlushAsync();
+                    continue;
+                }
+
+                var result = item.Api is null
+                    ? await ExecuteCaseAsync(connection!, settings!, item)
+                    : await ExecuteApiCaseAsync(connection, settings, item);
+                await writer.WriteLineAsync(JsonSerializer.Serialize(result, JsonOptions));
+                await writer.FlushAsync();
+                if (result.Status != "pass")
+                {
+                    Console.Error.WriteLine($"{result.Status,-5} {item.Id} ({result.DurationMs} ms)");
+                }
+                if (result.Status is "error" or "fail")
+                {
+                    failures++;
+                    if (failFast) break;
+                }
             }
-            if (result.Status == "error")
+
+            return failures == 0 ? 0 : 1;
+        }
+        finally
+        {
+            if (connection is not null)
             {
-                failures++;
-                if (failFast) break;
+                await connection.DisposeAsync();
             }
         }
-
-        return failures == 0 ? 0 : 1;
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -159,6 +189,18 @@ internal static class Program
         public List<string> Setup { get; init; } = new();
         public List<string> Cleanup { get; init; } = new();
         public Dictionary<string, string> SqlOverrides { get; init; } = new();
+        public string? ExpectErrorClass { get; init; }
+    }
+
+    private static bool IsOfflineCase(Case item)
+    {
+        if (item.Api is not { } api
+            || !api.TryGetProperty("operation", out var operationElement))
+        {
+            return false;
+        }
+
+        return (operationElement.GetString() ?? string.Empty).StartsWith("handshake_", StringComparison.Ordinal);
     }
 
     private sealed class Param
@@ -230,6 +272,11 @@ internal static class Program
                     SqlOverrides = element.TryGetProperty("sql_overrides", out var overrides)
                         ? overrides.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString() ?? string.Empty)
                         : new Dictionary<string, string>(),
+                    ExpectErrorClass = element.TryGetProperty("expect", out var expect)
+                        && expect.TryGetProperty("error", out var expectedError)
+                        && expectedError.TryGetProperty("class", out var expectedClass)
+                            ? expectedClass.GetString()
+                            : null,
                 };
             }
         }
@@ -263,7 +310,7 @@ internal static class Program
     private sealed record ResultSet(List<ColumnResult> Columns, List<List<object?>> Rows, int RowCount);
     private sealed record ErrorResult(string Class, string Message, string? Code);
 
-    private static async Task<CaseResult> ExecuteApiCaseAsync(NzConnection connection, Settings settings, Case item)
+    private static async Task<CaseResult> ExecuteApiCaseAsync(NzConnection? connection, Settings? settings, Case item)
     {
         var started = DateTime.UtcNow;
         var result = new CaseResult { CaseId = item.Id, Profile = item.Profile };
@@ -278,7 +325,7 @@ internal static class Program
             {
                 try
                 {
-                    await ExecuteNonQueryAsync(connection, RenderSql(statement, settings.Schema), settings.CommandTimeout);
+                    await ExecuteNonQueryAsync(connection!, RenderSql(statement, settings!.Schema), settings.CommandTimeout);
                 }
                 catch (Exception error) when (IsMissingObject(error))
                 {
@@ -287,10 +334,10 @@ internal static class Program
 
             var (columns, rows) = operation switch
             {
-                "metadata_ddl" => await ApiMetadataDdlAsync(connection, settings, api),
-                "pool_reuse" => await ApiPoolReuseAsync(settings, api),
-                "external_roundtrip" => await ApiExternalRoundtripAsync(connection, settings, api),
-                "tls_fail_closed" => await ApiTlsFailClosedAsync(settings),
+                "metadata_ddl" => await ApiMetadataDdlAsync(connection!, settings!, api),
+                "pool_reuse" => await ApiPoolReuseAsync(settings!, api),
+                "external_roundtrip" => await ApiExternalRoundtripAsync(connection!, settings!, api),
+                "tls_fail_closed" => await ApiTlsFailClosedAsync(settings!),
                 "handshake_tls_refusal" => await ApiHandshakeTlsRefusalAsync(api),
                 "handshake_unsupported_auth" => await ApiHandshakeUnsupportedAuthAsync(api),
                 "handshake_invalid_version" => await ApiHandshakeInvalidVersionAsync(api),
@@ -300,11 +347,23 @@ internal static class Program
             result.Rows = rows;
             result.RowCount = rows.Count;
             result.ResultSets = new List<ResultSet> { new(columns, rows, rows.Count) };
+
+            if (item.ExpectErrorClass is not null)
+            {
+                result.Status = "fail";
+                result.Error = new ErrorResult(
+                    "expectation",
+                    $"expected a {item.ExpectErrorClass} error, but the operation succeeded",
+                    null);
+            }
         }
         catch (Exception error)
         {
-            result.Status = "error";
             result.Error = ClassifyError(error);
+            result.Status = item.ExpectErrorClass is not null
+                && string.Equals(result.Error.Class, item.ExpectErrorClass, StringComparison.Ordinal)
+                    ? "pass"
+                    : "error";
         }
         finally
         {
@@ -312,7 +371,7 @@ internal static class Program
             {
                 try
                 {
-                    await ExecuteNonQueryAsync(connection, RenderSql(statement, settings.Schema), settings.CommandTimeout);
+                    await ExecuteNonQueryAsync(connection!, RenderSql(statement, settings!.Schema), settings.CommandTimeout);
                 }
                 catch (Exception error)
                 {

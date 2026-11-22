@@ -1,0 +1,7 @@
+is_global = true
+
+# The test suite intentionally exercises the synchronous protocol and the
+# driver's own sequential collection. xUnit1051 is advisory; the fixer cannot
+# rewrite the whole solution, so it is reported as a suggestion instead of a
+# warning that would fail `dotnet format`.
+dotnet_diagnostic.xUnit1051.severity = suggestion

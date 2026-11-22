@@ -1,6 +1,6 @@
-using System.Text;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Jobs;
+using System.Text;
 
 namespace JustyBase.NetezzaDriver.Benchmarks;
 

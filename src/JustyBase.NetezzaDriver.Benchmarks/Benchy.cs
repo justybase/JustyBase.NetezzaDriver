@@ -1,4 +1,4 @@
-﻿using BenchmarkDotNet.Attributes;
+using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Jobs;
 using System.Data.Common;
 using System.Data.Odbc;
@@ -24,7 +24,7 @@ public class Benchy
         _nzConnectionDefault.Open();
 
         _nzConnectionNoStreamBuffer = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
-        _nzConnectionNoStreamBuffer.Open(useBufferedStream:false, setSocketBufferSizes:true);
+        _nzConnectionNoStreamBuffer.Open(useBufferedStream: false, setSocketBufferSizes: true);
 
         _nzConnectionNoStreamBufferNoSocketBuffer = new NzConnection(Config.UserName, Config.Password, Config.Host, Config.DbName, Config.Port);
         _nzConnectionNoStreamBufferNoSocketBuffer.Open(useBufferedStream: false, setSocketBufferSizes: false);
@@ -87,7 +87,7 @@ public class Benchy
         ReadedTyped(_nzConnectionNoStreamBufferNoSocketBuffer, Query);
     }
 
-   //[Benchmark]
+    //[Benchmark]
     public void JustyNzDriver4()
     {
         ReadedTyped(_nzConnectionStreamBufferSocketBuffer2, Query);

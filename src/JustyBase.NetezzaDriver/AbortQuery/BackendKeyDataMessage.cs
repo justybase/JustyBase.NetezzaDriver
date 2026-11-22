@@ -1,4 +1,4 @@
-﻿using JustyBase.NetezzaDriver.Utility;
+using JustyBase.NetezzaDriver.Utility;
 
 namespace JustyBase.NetezzaDriver.AbortQuery;
 

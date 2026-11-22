@@ -85,7 +85,7 @@ public class PGUtilTests
         // Assert
         Assert.Equal(5, remainingByte);
     }
-    
+
     [Fact]
     public void Skip4Bytes_CustomCount_SkipsCorrectly()
     {

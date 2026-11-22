@@ -6,11 +6,38 @@ on:
       - main
       - master
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
+  format:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-dotnet@v6.1.0
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+
+      - name: Restore
+        run: dotnet restore ./src/JustyBase.NetezzaDriver.slnx
+
+      - name: Verify formatting
+        run: dotnet format ./src/JustyBase.NetezzaDriver.slnx --verify-no-changes --no-restore --verbosity minimal
+
   build-test-pack:
+    name: Build, test and pack (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
 
@@ -35,3 +62,68 @@ jobs:
       - name: Pack
         if: matrix.os == 'ubuntu-latest'
         run: dotnet pack ./src/JustyBase.NetezzaDriver/JustyBase.NetezzaDriver.csproj -c Release --no-build --output ./nupkg /p:GeneratePackageOnBuild=false
+
+  coverage:
+    name: Coverage gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-dotnet@v6.1.0
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+
+      - name: Restore
+        run: dotnet restore ./src/JustyBase.NetezzaDriver.slnx
+
+      - name: Build
+        run: dotnet build ./src/JustyBase.NetezzaDriver.slnx -c Release --no-restore
+
+      - name: Unit tests with coverage
+        run: >
+          dotnet test ./src/JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj
+          -c Release -f net10.0 --no-build --filter "Category=Unit"
+          --collect:"XPlat Code Coverage"
+          --results-directory TestResults/coverage
+          --logger "console;verbosity=minimal"
+
+      - name: Enforce coverage gates
+        shell: pwsh
+        run: ./eng/check-coverage.ps1 -ResultsDirectory TestResults/coverage
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-net10
+          path: TestResults/coverage/**/coverage.cobertura.xml
+          if-no-files-found: warn
+
+  conformance-offline:
+    name: Conformance (offline handshake)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-dotnet@v6.1.0
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+
+      - name: Restore
+        run: dotnet restore ./tools/JustyBase.NetezzaDriver.Conformance/JustyBase.NetezzaDriver.Conformance.csproj
+
+      - name: Build runner
+        run: dotnet build ./tools/JustyBase.NetezzaDriver.Conformance/JustyBase.NetezzaDriver.Conformance.csproj -c Release --no-restore
+
+      - name: Run handshake profile without an appliance
+        run: >
+          dotnet run --project ./tools/JustyBase.NetezzaDriver.Conformance/JustyBase.NetezzaDriver.Conformance.csproj
+          -c Release --no-build --
+          --profile handshake --offline --cases-dir eng/conformance/cases

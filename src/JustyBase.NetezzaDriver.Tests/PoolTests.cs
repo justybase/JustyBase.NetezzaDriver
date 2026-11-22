@@ -276,7 +276,14 @@ public class PoolUnitTests
     {
         var builder = new NzConnectionStringBuilder
         {
-            Host = "h", Database = "d", UserName = "u", Password = "p", Port = 5480, Pooling = true, MinPoolSize = 2, MaxPoolSize = 20
+            Host = "h",
+            Database = "d",
+            UserName = "u",
+            Password = "p",
+            Port = 5480,
+            Pooling = true,
+            MinPoolSize = 2,
+            MaxPoolSize = 20
         };
         var s = builder.ToString();
         Assert.Contains("Pooling=True", s);
@@ -490,7 +497,7 @@ public class PoolUnitTests
     }
 
     [Fact]
-    public void ConnectionSlotReservation_CapsAtMaxPoolSize()
+    public async Task ConnectionSlotReservation_CapsAtMaxPoolSize()
     {
         var pool = new NzConnectionPool("host", "db", "user", "pass", 5480, 0, 3, 30, 0);
         try
@@ -509,7 +516,7 @@ public class PoolUnitTests
         }
         finally
         {
-            pool.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            await pool.DisposeAsync();
         }
     }
 

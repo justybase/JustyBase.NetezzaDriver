@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Security.Authentication;
 
 namespace JustyBase.NetezzaDriver.Tests;

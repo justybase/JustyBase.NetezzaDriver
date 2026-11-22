@@ -1,6 +1,6 @@
-using System.Text;
 using JustyBase.NetezzaDriver;
 using JustyBase.NetezzaDriver.StringPool;
+using System.Text;
 
 namespace JustyBase.NetezzaDriver.Tests;
 

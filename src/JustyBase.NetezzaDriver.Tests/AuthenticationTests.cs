@@ -1,5 +1,5 @@
-using Xunit;
 using JustyBase.NetezzaDriver;
+using Xunit;
 
 namespace JustyBase.NetezzaDriver.Tests;
 

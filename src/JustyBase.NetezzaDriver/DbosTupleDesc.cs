@@ -1,4 +1,4 @@
-﻿/// <summary>
+/// <summary>
 /// Represents the description of a tuple in the Netezza database.
 /// Parsed metadata and the per-field arrays share one representation: the
 /// descriptor payload is copied straight into the final arrays once

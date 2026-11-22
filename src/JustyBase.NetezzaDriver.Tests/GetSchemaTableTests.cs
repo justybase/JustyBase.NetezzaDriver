@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
@@ -25,7 +25,7 @@ public class GetSchemaTableTests
                 ORDER BY D.DATEKEY
                 LIMIT 2";
 
-        using var reader = cmd.ExecuteReader();        
+        using var reader = cmd.ExecuteReader();
         var schemaTable = reader.GetSchemaTable();
 
         Assert.NotNull(schemaTable);
@@ -67,7 +67,7 @@ public class GetSchemaTableTests
 
         Assert.NotNull(schemaTable);
         var row = schemaTable!.Rows[0];
-        Assert.Equal<bool>(false, (bool)row["AllowDBNull"]);
+        Assert.False((bool)row["AllowDBNull"]);
     }
 
     [Fact]
@@ -87,10 +87,10 @@ public class GetSchemaTableTests
 
         Assert.NotNull(schemaTable);
         var row = schemaTable!.Rows[0];
-        Assert.Equal<bool>(false, (bool)row["AllowDBNull"]);
+        Assert.False((bool)row["AllowDBNull"]);
 
         row = schemaTable.Rows[1];
-        Assert.Equal<bool>(true, (bool)row["AllowDBNull"]);
+        Assert.True((bool)row["AllowDBNull"]);
     }
 
     [Fact]

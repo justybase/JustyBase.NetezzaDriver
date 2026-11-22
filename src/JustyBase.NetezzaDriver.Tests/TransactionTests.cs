@@ -1,4 +1,4 @@
-﻿
+
 namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
@@ -39,7 +39,7 @@ public class TransactionTests
         }
         catch (Exception ex)
         {
-            Assert.Fail( $"Expected no exception, but got: {ex.Message}");
+            Assert.Fail($"Expected no exception, but got: {ex.Message}");
         }
 
     }

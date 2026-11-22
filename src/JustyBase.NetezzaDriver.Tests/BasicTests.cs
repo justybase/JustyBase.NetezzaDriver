@@ -1,4 +1,4 @@
-﻿namespace JustyBase.NetezzaDriver.Tests;
+namespace JustyBase.NetezzaDriver.Tests;
 
 [Collection("Sequential")]
 [Trait("Category", "Integration")]
@@ -151,7 +151,7 @@ public class BasicTests : IDisposable
         using var rdr = cmd.ExecuteReader();
         while (rdr.Read())
         {
-            
+
         }
     }
     [Fact]
@@ -363,14 +363,14 @@ public class BasicTests : IDisposable
 //    , 3.14 ::numeric(38,8) as c
 //    , 923281625142643375987.43950777::numeric(38,8) AS C8 -- to big for c# numeric
 //    , -923281625142643375987.43950777::numeric(38,8) AS C9 -- to big for c# numeric
-    
+
 //    ,3.14::numeric(20,4) AS C10
 //    , ((0.5 - RANDOM())*1000000000 + random()::numeric(20,4))::numeric(20,4)  AS C11
 //    , (0.5 - RANDOM())::numeric(20,8) as x1,  10*x1+ random()::numeric(20,4) AS C12
 //    , 100*x1+ random()::numeric(20,4) AS C13
 //    , 1000*x1+ random()::numeric(20,4) AS C14
 //    , 10000*x1+ random()::numeric(20,4) AS C15
-    
+
 //    , 10000*(0.5 - RANDOM())::numeric(10,0) AS C16
 //    , 10000*(0.5 - RANDOM())::numeric(10,1) AS C17
 //    , 10000*(0.5 - RANDOM())::numeric(10,2) AS C18
@@ -381,7 +381,7 @@ public class BasicTests : IDisposable
 //    , 10000*(0.5 - RANDOM())::numeric(10,7) AS C23
 //    , 10000*(0.5 - RANDOM())::numeric(10,8) AS C24
 //    , 10000*(0.5 - RANDOM())::numeric(10,8) AS C25
-    
+
 //    , 10000*(0.5 - RANDOM())::numeric(14,0) AS C26
 //    , 10000*(0.5 - RANDOM())::numeric(14,1) AS C27
 //    , 10000*(0.5 - RANDOM())::numeric(14,2) AS C28
@@ -392,7 +392,7 @@ public class BasicTests : IDisposable
 //    , 10000*(0.5 - RANDOM())::numeric(14,7) AS C33
 //    , 10000*(0.5 - RANDOM())::numeric(14,8) AS C34
 //    , 10000*(0.5 - RANDOM())::numeric(14,8) AS C35
-    
+
 //    , 10000*(0.5 - RANDOM())::numeric(20,0) AS C36
 //    , 10000*(0.5 - RANDOM())::numeric(20,1) AS C37
 //    , 10000*(0.5 - RANDOM())::numeric(20,2) AS C38
@@ -403,8 +403,8 @@ public class BasicTests : IDisposable
 //    , 10000*(0.5 - RANDOM())::numeric(20,7) AS C43
 //    , 10000*(0.5 - RANDOM())::numeric(20,8) AS C44
 //    , 10000*(0.5 - RANDOM())::numeric(20,8) AS C45
-    
-        
+
+
 //    , 10000*(0.5 - RANDOM())::numeric(24,0) AS C46
 //    , 10000*(0.5 - RANDOM())::numeric(24,1) AS C47
 //    , 10000*(0.5 - RANDOM())::numeric(24,2) AS C48
@@ -415,8 +415,8 @@ public class BasicTests : IDisposable
 //    , 10000*(0.5 - RANDOM())::numeric(24,7) AS C53
 //    , 10000*(0.5 - RANDOM())::numeric(24,8) AS C54
 //    , 10000*(0.5 - RANDOM())::numeric(24,8) AS C55 
-    
-    
+
+
 //    , 10000*(0.5 - RANDOM())::numeric(30,0) AS C146
 //    , 10000*(0.5 - RANDOM())::numeric(30,1) AS C147
 //    , 10000*(0.5 - RANDOM())::numeric(30,2) AS C148
@@ -427,8 +427,8 @@ public class BasicTests : IDisposable
 //    , 10000*(0.5 - RANDOM())::numeric(30,7) AS C153
 //    , 10000*(0.5 - RANDOM())::numeric(30,8) AS C154
 //    , 10000*(0.5 - RANDOM())::numeric(30,8) AS C155
-    
-        
+
+
 //    , 10000*(0.5 - RANDOM())::numeric(38,0) AS C246
 //    , 10000*(0.5 - RANDOM())::numeric(38,1) AS C247
 //    , 10000*(0.5 - RANDOM())::numeric(38,2) AS C248
@@ -439,7 +439,7 @@ public class BasicTests : IDisposable
 //    , 10000*(0.5 - RANDOM())::numeric(38,7) AS C253
 //    , 10000*(0.5 - RANDOM())::numeric(38,8) AS C254
 //    , 10000*(0.5 - RANDOM())::numeric(38,8) AS C255
-    
+
 //    ,*
 //    FROM JUST_DATA..FACTPRODUCTINVENTORY ORDER BY ROWID
 //    LIMIT 10000

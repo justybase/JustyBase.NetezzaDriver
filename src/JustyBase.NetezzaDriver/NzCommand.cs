@@ -1,4 +1,4 @@
-﻿using JustyBase.NetezzaDriver.StringPool;
+using JustyBase.NetezzaDriver.StringPool;
 using System.Collections.ObjectModel;
 using System.Data;
 using System.Data.Common;
@@ -140,7 +140,7 @@ public sealed class NzCommand : DbCommand
         return NewPreparedStatement.Description![fieldNum].Name;
     }
     [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties)]
-    
+
     internal Type GetFieldType(int fieldNum)
     {
         if (NewPreparedStatement is null)
@@ -236,7 +236,7 @@ public sealed class NzCommand : DbCommand
             }
 
             throw;
-        }        
+        }
         return this;
     }
 
@@ -331,7 +331,7 @@ public sealed class NzCommand : DbCommand
             _commandType = value;
         }
     }
-    protected override DbConnection? DbConnection 
+    protected override DbConnection? DbConnection
     {
         get => _connection;
         set

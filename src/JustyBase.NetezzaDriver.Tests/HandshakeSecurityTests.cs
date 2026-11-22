@@ -18,22 +18,15 @@ public sealed class HandshakeSecurityTests
         });
 
     [Fact]
-    public void TlsRefusal_WithOnlySecuredSession_FailsClosed()
+    public async Task TlsRefusal_WithOnlySecuredSession_FailsClosed()
     {
-        var server = StartTlsRefusalServer();
-        try
-        {
-            using var connection = CreateConnection(server.Port, SecurityLevelCode.OnlySecuredSession);
+        await using var server = StartTlsRefusalServer();
+        using var connection = CreateConnection(server.Port, SecurityLevelCode.OnlySecuredSession);
 
-            var error = Assert.Throws<NetezzaException>(() => connection.Open());
+        var error = Assert.Throws<NetezzaException>(() => connection.Open());
 
-            Assert.Contains("TLS session", error.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.Equal(ConnectionState.Closed, connection.State);
-        }
-        finally
-        {
-            server.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        }
+        Assert.Contains("TLS session", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(ConnectionState.Closed, connection.State);
     }
 
     [Fact]
@@ -49,27 +42,20 @@ public sealed class HandshakeSecurityTests
     }
 
     [Fact]
-    public void TlsRequiredByServer_WithOnlyUnsecuredSession_FailsClosed()
+    public async Task TlsRequiredByServer_WithOnlyUnsecuredSession_FailsClosed()
     {
-        var server = ScriptedNzServer.Start(async (stream, cancellationToken) =>
+        await using var server = ScriptedNzServer.Start(async (stream, cancellationToken) =>
         {
             await HandshakeWire.NegotiateVersion2AndReadSslRequestAsync(stream, cancellationToken)
                 .ConfigureAwait(false);
             await HandshakeWire.WriteAsync(stream, cancellationToken, (byte)'S').ConfigureAwait(false);
         });
 
-        try
-        {
-            using var connection = CreateConnection(server.Port, SecurityLevelCode.OnlyUnsecuredSession);
+        using var connection = CreateConnection(server.Port, SecurityLevelCode.OnlyUnsecuredSession);
 
-            var error = Assert.Throws<NetezzaException>(() => connection.Open());
+        var error = Assert.Throws<NetezzaException>(() => connection.Open());
 
-            Assert.Contains("OnlyUnsecuredSession", error.Message, StringComparison.Ordinal);
-        }
-        finally
-        {
-            server.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        }
+        Assert.Contains("OnlyUnsecuredSession", error.Message, StringComparison.Ordinal);
     }
 
     [Theory]

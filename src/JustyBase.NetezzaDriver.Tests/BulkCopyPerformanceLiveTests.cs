@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using JustyBase.NetezzaDriver;
+using System.Diagnostics;
 
 namespace JustyBase.NetezzaDriver.Tests;
 

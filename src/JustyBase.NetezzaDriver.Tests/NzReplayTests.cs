@@ -416,12 +416,12 @@ public sealed class NzReplayTests
         {
             created = conn;
             opened.SetResult(true);
-            await release.Task.ConfigureAwait(false);
+            await release.Task;
         };
 
         // Rent opens a connection, then stalls just before registering.
         var rent = pool.RentAsync();
-        await opened.Task.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+        await opened.Task.WaitAsync(TimeSpan.FromSeconds(15));
         Assert.NotNull(created);
 
         // Teardown completes while the rent is stalled (no active entry yet).
@@ -474,15 +474,15 @@ public sealed class NzReplayTests
             return release.Task;
         };
         var ret = Task.Run(() => lease2.DisposeAsync().AsTask());
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         // 4. Teardown starts.
-        var dispose = Task.Run(async () => await pool.DisposeAsync().ConfigureAwait(false));
+        var dispose = Task.Run(async () => await pool.DisposeAsync());
         bool disposeWaited;
         try
         {
             // 5. Must not complete while Return #2 is in flight.
-            var early = await Task.WhenAny(dispose, Task.Delay(400)).ConfigureAwait(false);
+            var early = await Task.WhenAny(dispose, Task.Delay(400));
             disposeWaited = !ReferenceEquals(early, dispose);
         }
         finally
@@ -494,8 +494,8 @@ public sealed class NzReplayTests
         Assert.True(disposeWaited, "DisposeAsync completed while a ReturnAsync was still in flight.");
 
         // 6. Release, then teardown completes.
-        await ret.ConfigureAwait(false);
-        await dispose.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+        await ret;
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
 
         // 7. Nothing left behind.
         Assert.Equal(1, pool.DisposeCoreRunCount);
@@ -530,11 +530,11 @@ public sealed class NzReplayTests
                 opened.SetResult(true);
                 // Block until the test cancels: the cancellation lands after
                 // a successful Open but before the idle enqueue.
-                await Task.Delay(Timeout.Infinite, cts.Token).ConfigureAwait(false);
+                await Task.Delay(Timeout.Infinite, cts.Token);
             };
 
             var park = pool.TryCreateAndParkIdleAsync(cts.Token);
-            Assert.True(await opened.Task.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false));
+            Assert.True(await opened.Task.WaitAsync(TimeSpan.FromSeconds(15)));
             Assert.NotNull(created);
             cts.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => park);
@@ -589,7 +589,7 @@ public sealed class NzReplayTests
                     using var opCts = new CancellationTokenSource();
                     if (rnd.Next(10) == 0)
                         opCts.Cancel();
-                    lease = await pool.RentAsync(opCts.Token).ConfigureAwait(false);
+                    lease = await pool.RentAsync(opCts.Token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -607,10 +607,10 @@ public sealed class NzReplayTests
                 try
                 {
                     await using var cmd = lease.Connection.CreateCommand(fixture.Query);
-                    await using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+                    await using var reader = await cmd.ExecuteReaderAsync();
                     int want = rnd.Next(1, 5);
                     int n = 0;
-                    while (n < want && await reader.ReadAsync().ConfigureAwait(false))
+                    while (n < want && await reader.ReadAsync())
                     {
                         _ = reader.GetValue(0);
                         n++;
@@ -625,7 +625,7 @@ public sealed class NzReplayTests
                 {
                     // Must never throw (not even ODE): ReturnAsync is safe
                     // against a concurrently disposed pool by design.
-                    await lease.DisposeAsync().ConfigureAwait(false);
+                    await lease.DisposeAsync();
                 }
             }
         }
@@ -640,7 +640,7 @@ public sealed class NzReplayTests
                     using var mcts = new CancellationTokenSource();
                     if (rnd.Next(3) == 0)
                         mcts.Cancel();
-                    await pool.RunMaintenanceForTestsAsync(mcts.Token).ConfigureAwait(false);
+                    await pool.RunMaintenanceForTestsAsync(mcts.Token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -649,26 +649,26 @@ public sealed class NzReplayTests
                 {
                     return;
                 }
-                await Task.Delay(5).ConfigureAwait(false);
+                await Task.Delay(5);
             }
         }
 
         var workers = Enumerable.Range(0, 6).Select(i => Task.Run(() => Worker(i))).ToArray();
         var maints = Enumerable.Range(0, 2).Select(_ => Task.Run(Maintainer)).ToArray();
 
-        await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromSeconds(2));
         // Tear down while workers/maintainers are still in flight.
         var disposers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
         {
-            await pool.DisposeAsync().ConfigureAwait(false);
+            await pool.DisposeAsync();
         })).ToArray();
         // Bounded joins: a lifecycle regression must fail fast here instead
         // of hanging the runner indefinitely.
         var joinTimeout = TimeSpan.FromSeconds(90);
-        await Task.WhenAll(disposers).WaitAsync(joinTimeout).ConfigureAwait(false);
+        await Task.WhenAll(disposers).WaitAsync(joinTimeout);
         stop.Set();
-        await Task.WhenAll(workers).WaitAsync(joinTimeout).ConfigureAwait(false);
-        await Task.WhenAll(maints).WaitAsync(joinTimeout).ConfigureAwait(false);
+        await Task.WhenAll(workers).WaitAsync(joinTimeout);
+        await Task.WhenAll(maints).WaitAsync(joinTimeout);
 
         Assert.Equal(0, pool.TotalConnections);
         Assert.Equal(0, pool.ActiveCount);

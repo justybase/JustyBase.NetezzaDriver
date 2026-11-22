@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
@@ -48,7 +48,7 @@ public class CommandTimeoutTest
                 rdr2.Read();
                 var sessionCount = rdr2.GetInt64(0);
                 Assert.Equal(0, sessionCount);
-       
+
                 //_output.WriteLine("CHECK QUERIES ON DATABASE SIDE TO COFIRM !! (3 s)");
                 //await Task.Delay(3_000);
                 //_output.WriteLine();

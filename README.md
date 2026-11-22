@@ -455,6 +455,28 @@ Live tests read their configuration from:
 
 No credentials or lab addresses are embedded in the repository.
 
+The unit suite includes byte-exact replays of the shared golden wire corpus
+(`src/JustyBase.NetezzaDriver.TestSupport/Fixtures/Wire`), fault injection for
+errors, notices, command timeouts and truncated responses, and seeded
+property/fuzz tests. Set `NZ_FUZZ_ITERATIONS` to run longer fuzz campaigns
+locally; CI uses the default 250 iterations.
+
+Quality gates mirror the Rust driver's CI:
+
+```bash
+dotnet format ./src/JustyBase.NetezzaDriver.slnx --verify-no-changes
+dotnet test ./src/JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj \
+  -c Release -f net10.0 --filter "Category=Unit" \
+  --collect:"XPlat Code Coverage" --results-directory TestResults/coverage
+pwsh ./eng/check-coverage.ps1 -ResultsDirectory TestResults/coverage
+```
+
+The coverage script enforces two gates: 70% for the offline protocol primitives
+(decoders, reader and parameter formatting) and a ratcheting 55% floor for the
+whole driver. Bulk copy, external tables and catalog DDL need a live appliance
+and are covered by the conformance profile rather than by offline line
+coverage.
+
 ## Cross-driver conformance
 
 A shared conformance corpus runs the same cases against the C#, Rust, Node and
@@ -466,7 +488,13 @@ Python drivers. It provisions its own `CONFORMANCE` schema on a live appliance.
 
 The C# runner is available at
 `tools/JustyBase.NetezzaDriver.Conformance` and produces a case matrix, known
-divergences and JUnit XML.
+divergences and JUnit XML. Handshake failures can be exercised without an
+appliance; the vendored case file lives in `eng/conformance/cases`:
+
+```powershell
+dotnet run --project tools\JustyBase.NetezzaDriver.Conformance -- \
+  --profile handshake --offline --cases-dir eng\conformance\cases
+```
 
 ## Documentation
 
@@ -485,8 +513,11 @@ Before opening a pull request:
 
 ```bash
 dotnet build ./src/JustyBase.NetezzaDriver.slnx -c Release
+dotnet format ./src/JustyBase.NetezzaDriver.slnx --verify-no-changes
 dotnet test ./src/JustyBase.NetezzaDriver.Tests/JustyBase.NetezzaDriver.Tests.csproj \
   -c Release --filter "Category=Unit"
+dotnet run --project ./tools/JustyBase.NetezzaDriver.Conformance \
+  -c Release -- --profile handshake --offline --cases-dir eng/conformance/cases
 ```
 
 ## License

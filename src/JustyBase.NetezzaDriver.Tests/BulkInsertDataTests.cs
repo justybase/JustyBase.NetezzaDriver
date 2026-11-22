@@ -1,7 +1,7 @@
+using JustyBase.NetezzaDriver;
 using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
-using JustyBase.NetezzaDriver;
 
 namespace JustyBase.NetezzaDriver.Tests;
 

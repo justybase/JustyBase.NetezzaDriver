@@ -1,4 +1,4 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 
 namespace JustyBase.NetezzaDriver;
@@ -91,8 +91,8 @@ internal static class Core
     public const int EXTAB_SOCK_DATA = 1;//  # block of records
     public const int EXTAB_SOCK_ERROR = 2;//  # error message
     public const int EXTAB_SOCK_DONE = 3;//  # normal wrap-up
-    //public const int EXTAB_SOCK_FLUSH = 4;//  # Flush the current buffer/data
-    
+                                         //public const int EXTAB_SOCK_FLUSH = 4;//  # Flush the current buffer/data
+
     //public static byte[] FLUSH_MSG;
     //public static byte[] SYNC_MSG;
     //public static byte[] TERMINATE_MSG;
@@ -101,11 +101,11 @@ internal static class Core
 
     //static Core()
     //{
-        //FLUSH_MSG  = CreateMessage(FrontendMessageCode.Flush);
-        //SYNC_MSG = CreateMessage(FrontendMessageCode.Sync);
-        //TERMINATE_MSG = CreateMessage(FrontendMessageCode.Terminate);
-        //COPY_DONE_MSG = CreateMessage((byte)BackendMessageCode.CopyDone);
-        //EXECUTE_MSG = CreateMessage(FrontendMessageCode.Execute, [0,0,0,0,0]);
+    //FLUSH_MSG  = CreateMessage(FrontendMessageCode.Flush);
+    //SYNC_MSG = CreateMessage(FrontendMessageCode.Sync);
+    //TERMINATE_MSG = CreateMessage(FrontendMessageCode.Terminate);
+    //COPY_DONE_MSG = CreateMessage((byte)BackendMessageCode.CopyDone);
+    //EXECUTE_MSG = CreateMessage(FrontendMessageCode.Execute, [0,0,0,0,0]);
     //}
     //private static byte[] CreateMessage(byte code, byte[]? data = null)
     //{

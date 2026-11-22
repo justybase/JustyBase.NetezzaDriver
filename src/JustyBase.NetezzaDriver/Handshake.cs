@@ -86,7 +86,7 @@ internal sealed class Handshake
     //private Dictionary<string, string>? _sslParams;
 
     public ClientTypeId NPSCLIENT_TYPE_PYTHON { get; init; } = ClientTypeId.SqlPython;
-    public Handshake(Socket socket, Stream stream, string host,string? sslCerFilePath,  ILoggerFactory? loggerFactory)
+    public Handshake(Socket socket, Stream stream, string host, string? sslCerFilePath, ILoggerFactory? loggerFactory)
     {
         _usocket = socket;
         _stream = stream;
@@ -98,7 +98,7 @@ internal sealed class Handshake
         {
             _guardiumClientOS = "Windows";
         }
-        else if(RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
         {
             _guardiumClientOS = "Linux";
         }
@@ -218,57 +218,57 @@ internal sealed class Handshake
                 return true;
 
             case AUTH_REQ_PASSWORD:
-            {
-                _logger?.LogInformation("Plain password requested");
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-                PGUtil.WriteInt32(_stream, passwordBytes.Length + 1 + 4);
-                _stream.Write(passwordBytes);
-                _stream.WriteByte((byte)0);
-                _stream.Flush();
-                return true;
-            }
+                {
+                    _logger?.LogInformation("Plain password requested");
+                    byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                    PGUtil.WriteInt32(_stream, passwordBytes.Length + 1 + 4);
+                    _stream.Write(passwordBytes);
+                    _stream.WriteByte((byte)0);
+                    _stream.Flush();
+                    return true;
+                }
 
             case AUTH_REQ_MD5:
-            {
-                _logger?.LogInformation("Password type is MD5");
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-                byte[] salt = new byte[2];
-                _stream.ReadExactly(salt, 0, 2);
-                var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
-                var md5pwd = Convert.ToBase64String(md5encoded);
-                var pwd = md5pwd.TrimEnd('=').ToArray();
-                _logger?.LogDebug("MD5 password response generated");
+                {
+                    _logger?.LogInformation("Password type is MD5");
+                    byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                    byte[] salt = new byte[2];
+                    _stream.ReadExactly(salt, 0, 2);
+                    var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
+                    var md5pwd = Convert.ToBase64String(md5encoded);
+                    var pwd = md5pwd.TrimEnd('=').ToArray();
+                    _logger?.LogDebug("MD5 password response generated");
 
-                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-                // Int32 - Message length including self.
-                // String - The password.  Password may be encrypted.
-                PGUtil.WriteInt32(_stream, pwdBytes.Length + 1 + 4);
-                _stream.Write(pwdBytes);
-                _stream.WriteByte((byte)0);
-                _stream.Flush();
-                return true;
-            }
+                    var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                    // Int32 - Message length including self.
+                    // String - The password.  Password may be encrypted.
+                    PGUtil.WriteInt32(_stream, pwdBytes.Length + 1 + 4);
+                    _stream.Write(pwdBytes);
+                    _stream.WriteByte((byte)0);
+                    _stream.Flush();
+                    return true;
+                }
 
             case AUTH_REQ_SHA256:
-            {
-                _logger?.LogInformation("Password type is SHA-256");
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-                byte[] salt = new byte[2];
-                _stream.ReadExactly(salt, 0, 2);
-                var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
-                var sha256pwd = Convert.ToBase64String(sha256encoded);
-                var pwd = sha256pwd.TrimEnd('=').ToArray();
-                _logger?.LogDebug("SHA256 password response generated");
+                {
+                    _logger?.LogInformation("Password type is SHA-256");
+                    byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                    byte[] salt = new byte[2];
+                    _stream.ReadExactly(salt, 0, 2);
+                    var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
+                    var sha256pwd = Convert.ToBase64String(sha256encoded);
+                    var pwd = sha256pwd.TrimEnd('=').ToArray();
+                    _logger?.LogDebug("SHA256 password response generated");
 
-                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-                // Int32 - Message length including self.
-                // String - The password.  Password may be encrypted.
-                PGUtil.WriteInt32(_stream, pwdBytes.Length + 1 + 4);
-                _stream.Write(pwdBytes);
-                _stream.WriteByte((byte)0);
-                _stream.Flush();
-                return true;
-            }
+                    var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                    // Int32 - Message length including self.
+                    // String - The password.  Password may be encrypted.
+                    PGUtil.WriteInt32(_stream, pwdBytes.Length + 1 + 4);
+                    _stream.Write(pwdBytes);
+                    _stream.WriteByte((byte)0);
+                    _stream.Flush();
+                    return true;
+                }
 
             case AUTH_REQ_KRB5:
                 throw new NetezzaException(
@@ -302,53 +302,53 @@ internal sealed class Handshake
                 return true;
 
             case AUTH_REQ_PASSWORD:
-            {
-                _logger?.LogInformation("Plain password requested");
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-                await WriteInt32Async(passwordBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-                await _stream.WriteAsync(passwordBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-                await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
-                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                return true;
-            }
+                {
+                    _logger?.LogInformation("Plain password requested");
+                    byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                    await WriteInt32Async(passwordBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                    await _stream.WriteAsync(passwordBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
+                    await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    return true;
+                }
 
             case AUTH_REQ_MD5:
-            {
-                _logger?.LogInformation("Password type is MD5");
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-                byte[] salt = new byte[2];
-                await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
-                var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
-                var md5pwd = Convert.ToBase64String(md5encoded);
-                var pwd = md5pwd.TrimEnd('=').ToArray();
-                _logger?.LogDebug("MD5 password response generated");
+                {
+                    _logger?.LogInformation("Password type is MD5");
+                    byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                    byte[] salt = new byte[2];
+                    await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
+                    var md5encoded = MD5.HashData(salt.Concat(passwordBytes).ToArray());
+                    var md5pwd = Convert.ToBase64String(md5encoded);
+                    var pwd = md5pwd.TrimEnd('=').ToArray();
+                    _logger?.LogDebug("MD5 password response generated");
 
-                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-                await WriteInt32Async(pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-                await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-                await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
-                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                return true;
-            }
+                    var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                    await WriteInt32Async(pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                    await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
+                    await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    return true;
+                }
 
             case AUTH_REQ_SHA256:
-            {
-                _logger?.LogInformation("Password type is SHA-256");
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-                byte[] salt = new byte[2];
-                await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
-                var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
-                var sha256pwd = Convert.ToBase64String(sha256encoded);
-                var pwd = sha256pwd.TrimEnd('=').ToArray();
-                _logger?.LogDebug("SHA256 password response generated");
+                {
+                    _logger?.LogInformation("Password type is SHA-256");
+                    byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+                    byte[] salt = new byte[2];
+                    await _stream.ReadExactlyAsync(salt.AsMemory(0, 2), cancellationToken).ConfigureAwait(false);
+                    var sha256encoded = SHA256.HashData(salt.Concat(passwordBytes).ToArray());
+                    var sha256pwd = Convert.ToBase64String(sha256encoded);
+                    var pwd = sha256pwd.TrimEnd('=').ToArray();
+                    _logger?.LogDebug("SHA256 password response generated");
 
-                var pwdBytes = Encoding.UTF8.GetBytes(pwd);
-                await WriteInt32Async(pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-                await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
-                await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
-                await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                return true;
-            }
+                    var pwdBytes = Encoding.UTF8.GetBytes(pwd);
+                    await WriteInt32Async(pwdBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                    await _stream.WriteAsync(pwdBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+                    await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
+                    await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    return true;
+                }
 
             case AUTH_REQ_KRB5:
                 throw new NetezzaException(
@@ -362,7 +362,7 @@ internal sealed class Handshake
 
 
 
-    private bool ConnHandshakeNegotiate(int? hsVersion,int? protocol2)
+    private bool ConnHandshakeNegotiate(int? hsVersion, int? protocol2)
     {
         int version = CP_VERSION_6;
         _logger?.LogDebug("Latest-handshake version (conn-protocol) = {Version}", version);
@@ -371,7 +371,7 @@ internal sealed class Handshake
         {
             _logger?.LogDebug("sending version: {Version}", version);
 
-            PGUtil.WriteInt32(_stream, 2+2 + 4);
+            PGUtil.WriteInt32(_stream, 2 + 2 + 4);
             PGUtil.WriteInt16(_stream, (short)HSV2_CLIENT_BEGIN);//2
             PGUtil.WriteInt16(_stream, (short)version);//2
             _stream.Flush();
@@ -436,9 +436,9 @@ internal sealed class Handshake
         {
             _logger?.LogDebug("sending version: {Version}", version);
 
-            await WriteInt32Async( 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
-            await WriteInt16Async( HSV2_CLIENT_BEGIN, cancellationToken).ConfigureAwait(false);
-            await WriteInt16Async( (short)version, cancellationToken).ConfigureAwait(false);
+            await WriteInt32Async(2 + 2 + 4, cancellationToken).ConfigureAwait(false);
+            await WriteInt16Async(HSV2_CLIENT_BEGIN, cancellationToken).ConfigureAwait(false);
+            await WriteInt16Async((short)version, cancellationToken).ConfigureAwait(false);
             await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
 
             _logger?.LogInformation("sent handshake negotiation block successfully");
@@ -493,7 +493,7 @@ internal sealed class Handshake
 
 
 
-    private bool ConnSendHandshakeInfo(string database, SecurityLevelCode securityLevel,int? hsVersion,string user,object? pgOptions)
+    private bool ConnSendHandshakeInfo(string database, SecurityLevelCode securityLevel, int? hsVersion, string user, object? pgOptions)
     {
         // We need database information at the backend in order to
         // select security restrictions. So always send the database first
@@ -595,8 +595,8 @@ internal sealed class Handshake
         {
             byte[] db = Encoding.UTF8.GetBytes(database);
             _logger?.LogInformation("Database name: {Database}", Encoding.UTF8.GetString(db));
-            await WriteInt32Async( 2 + db.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-            await WriteInt16Async( HSV2_DB, cancellationToken).ConfigureAwait(false);
+            await WriteInt32Async(2 + db.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+            await WriteInt16Async(HSV2_DB, cancellationToken).ConfigureAwait(false);
             await _stream.WriteAsync(db.AsMemory(), cancellationToken).ConfigureAwait(false);
             await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
             await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -750,9 +750,9 @@ internal sealed class Handshake
                 _logger?.LogDebug("Security Level requested = {SecurityLevel}", securityLevel);
             }
 
-            await WriteInt32Async( 2 + 4 + 4, cancellationToken).ConfigureAwait(false);
-            await WriteInt16Async( opcode, cancellationToken).ConfigureAwait(false);
-            await WriteInt32Async( currSecLevel, cancellationToken).ConfigureAwait(false);
+            await WriteInt32Async(2 + 4 + 4, cancellationToken).ConfigureAwait(false);
+            await WriteInt16Async(opcode, cancellationToken).ConfigureAwait(false);
+            await WriteInt32Async(currSecLevel, cancellationToken).ConfigureAwait(false);
             await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
 
             var beresp = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
@@ -766,8 +766,8 @@ internal sealed class Handshake
                         "The server requires a TLS session, but SecurityLevelCode.OnlyUnsecuredSession was requested.");
                 }
 
-                await WriteInt32Async( 2 + 4, cancellationToken).ConfigureAwait(false);
-                await WriteInt16Async( HSV2_SSL_CONNECT, cancellationToken).ConfigureAwait(false);
+                await WriteInt32Async(2 + 4, cancellationToken).ConfigureAwait(false);
+                await WriteInt16Async(HSV2_SSL_CONNECT, cancellationToken).ConfigureAwait(false);
 
                 var sslStream = new SslStream(_stream, false);
                 if (_sslCerFilePath is null)
@@ -848,7 +848,7 @@ internal sealed class Handshake
 
 
 
-    private bool ConnSendHandshakeVersion2(int? hsVersion, string user,object? pgOptions)
+    private bool ConnSendHandshakeVersion2(int? hsVersion, string user, object? pgOptions)
     {
         byte[] userBytes = Encoding.UTF8.GetBytes(user);
         short information = HSV2_USER;
@@ -937,8 +937,8 @@ internal sealed class Handshake
     {
         byte[] userBytes = Encoding.UTF8.GetBytes(user);
         short information = HSV2_USER;
-        await WriteInt32Async( 2 + userBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+        await WriteInt32Async(2 + userBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
         await _stream.WriteAsync(userBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
         await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -954,17 +954,17 @@ internal sealed class Handshake
                 switch (information)
                 {
                     case HSV2_PROTOCOL:
-                        await WriteInt32Async( 2 + 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( _protocol1, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( _protocol2, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(_protocol1, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(_protocol2, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         information = HSV2_REMOTE_PID;
                         continue;
                     case HSV2_REMOTE_PID:
-                        await WriteInt32Async( 2 + 4 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt32Async( Environment.ProcessId, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 4 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(Environment.ProcessId, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         information = pgOptions is null ? HSV2_CLIENT_TYPE : HSV2_OPTIONS;
                         continue;
@@ -972,9 +972,9 @@ internal sealed class Handshake
                         information = HSV2_CLIENT_TYPE;
                         continue;
                     case HSV2_CLIENT_TYPE:
-                        await WriteInt32Async( 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( (short)NPSCLIENT_TYPE_PYTHON, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async((short)NPSCLIENT_TYPE_PYTHON, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         if (hsVersion == CP_VERSION_5 || hsVersion == CP_VERSION_6)
                         {
@@ -986,15 +986,15 @@ internal sealed class Handshake
                         }
                         continue;
                     case HSV2_64BIT_VARLENA_ENABLED:
-                        await WriteInt32Async( 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( IPS_CLIENT, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(IPS_CLIENT, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         information = HSV2_CLIENT_DONE;
                         continue;
                     case HSV2_CLIENT_DONE:
-                        await WriteInt32Async( 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         return true;
                 }
@@ -1007,7 +1007,7 @@ internal sealed class Handshake
         }
         return true;
     }
-    
+
     public bool ConnSendHandshakeVersion4(int? hsVersion, string user, object? pgOptions)
     {
         byte[] userBytes = Encoding.UTF8.GetBytes(user);
@@ -1105,7 +1105,7 @@ internal sealed class Handshake
                         PGUtil.WriteInt32(_stream, 2 + 2 + 4);
                         PGUtil.WriteInt16(_stream, information);//2
                         PGUtil.WriteInt16(_stream, (short)NPSCLIENT_TYPE_PYTHON);//2
-                        _stream.Flush(); 
+                        _stream.Flush();
                         if (hsVersion == CP_VERSION_5 || hsVersion == CP_VERSION_6)
                         {
                             information = HSV2_64BIT_VARLENA_ENABLED;
@@ -1144,8 +1144,8 @@ internal sealed class Handshake
     {
         byte[] userBytes = Encoding.UTF8.GetBytes(user);
         short information = HSV2_USER;
-        await WriteInt32Async( 2 + userBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+        await WriteInt32Async(2 + userBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
         await _stream.WriteAsync(userBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
         await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -1162,8 +1162,8 @@ internal sealed class Handshake
                 {
                     case HSV2_APPNAME:
                         var guardiumAppNameBytes = Encoding.UTF8.GetBytes(_guardiumAppName);
-                        await WriteInt32Async( 2 + guardiumAppNameBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + guardiumAppNameBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(guardiumAppNameBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -1172,8 +1172,8 @@ internal sealed class Handshake
                         continue;
                     case HSV2_CLIENT_OS:
                         var guardiumClientOSBytes = Encoding.UTF8.GetBytes(_guardiumClientOS);
-                        await WriteInt32Async( 2 + guardiumClientOSBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + guardiumClientOSBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(guardiumClientOSBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -1182,8 +1182,8 @@ internal sealed class Handshake
                         continue;
                     case HSV2_CLIENT_HOST_NAME:
                         var guardiumClientHostNameBytes = Encoding.UTF8.GetBytes(_guardiumClientHostName);
-                        await WriteInt32Async( 2 + guardiumClientHostNameBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + guardiumClientHostNameBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(guardiumClientHostNameBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -1192,8 +1192,8 @@ internal sealed class Handshake
                         continue;
                     case HSV2_CLIENT_OS_USER:
                         var guardiumClientOSUserBytes = Encoding.UTF8.GetBytes(_guardiumClientOSUser);
-                        await WriteInt32Async( 2 + guardiumClientOSUserBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + guardiumClientOSUserBytes.Length + 1 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(guardiumClientOSUserBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
                         await _stream.WriteAsync(new byte[] { 0 }, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -1201,17 +1201,17 @@ internal sealed class Handshake
                         information = HSV2_PROTOCOL;
                         continue;
                     case HSV2_PROTOCOL:
-                        await WriteInt32Async( 2 + 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( _protocol1, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( _protocol2, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(_protocol1, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(_protocol2, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         information = HSV2_REMOTE_PID;
                         continue;
                     case HSV2_REMOTE_PID:
-                        await WriteInt32Async( 2 + 4 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt32Async( Environment.ProcessId, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 4 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(Environment.ProcessId, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         information = pgOptions is null ? HSV2_CLIENT_TYPE : HSV2_OPTIONS;
                         continue;
@@ -1219,9 +1219,9 @@ internal sealed class Handshake
                         information = HSV2_CLIENT_TYPE;
                         continue;
                     case HSV2_CLIENT_TYPE:
-                        await WriteInt32Async( 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( (short)NPSCLIENT_TYPE_PYTHON, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async((short)NPSCLIENT_TYPE_PYTHON, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         if (hsVersion == CP_VERSION_5 || hsVersion == CP_VERSION_6)
                         {
@@ -1233,16 +1233,16 @@ internal sealed class Handshake
                         }
                         continue;
                     case HSV2_64BIT_VARLENA_ENABLED:
-                        await WriteInt32Async( 2 + 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( IPS_CLIENT, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(IPS_CLIENT, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         information = HSV2_CLIENT_DONE;
                         continue;
 
                     case HSV2_CLIENT_DONE:
-                        await WriteInt32Async( 2 + 4, cancellationToken).ConfigureAwait(false);
-                        await WriteInt16Async( information, cancellationToken).ConfigureAwait(false);
+                        await WriteInt32Async(2 + 4, cancellationToken).ConfigureAwait(false);
+                        await WriteInt16Async(information, cancellationToken).ConfigureAwait(false);
                         await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                         information = 0;
                         return true;
@@ -1319,7 +1319,7 @@ internal sealed class Handshake
             {
                 byte[] bytes = ArrayPool<byte>.Shared.Rent(1024);
                 int readed = _stream.Read(bytes, 0, 1024);
-                string error = Encoding.UTF8.GetString(bytes,0, readed);
+                string error = Encoding.UTF8.GetString(bytes, 0, readed);
                 ArrayPool<byte>.Shared.Return(bytes);
                 _logger?.LogWarning("Error occurred, server response: {Error}", error);
                 throw new NetezzaException(error);
@@ -1351,13 +1351,13 @@ internal sealed class Handshake
 
             if (response != (byte)BackendMessageCode.AuthenticationRequest && response != (byte)BackendMessageCode.ErrorResponse)
             {
-                await Skip4BytesAsync( cancellationToken: cancellationToken).ConfigureAwait(false);
-                await Skip4BytesAsync( cancellationToken: cancellationToken).ConfigureAwait(false);
+                await Skip4BytesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+                await Skip4BytesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             if (response == (byte)BackendMessageCode.AuthenticationRequest)
             {
-                int areq = await ReadInt32Async( cancellationToken).ConfigureAwait(false);
+                int areq = await ReadInt32Async(cancellationToken).ConfigureAwait(false);
                 _logger?.LogInformation("backend response: {Areq}", areq);
             }
 

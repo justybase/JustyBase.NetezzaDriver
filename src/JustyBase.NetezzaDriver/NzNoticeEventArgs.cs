@@ -1,4 +1,4 @@
-﻿namespace JustyBase.NetezzaDriver;
+namespace JustyBase.NetezzaDriver;
 
 public sealed partial class NzNoticeEventArgs : System.EventArgs
 {
