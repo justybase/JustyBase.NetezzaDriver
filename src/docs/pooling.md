@@ -8,7 +8,8 @@
 - Connection idle timeout (connections idle longer than this are closed)
 - Connection max lifetime (connections older than this are replaced)
 - Background maintenance timer that cleans idle connections every 30 seconds
-- Connection validation via `SELECT 1` before returning to consumer
+- Connection validation via `SELECT 1` on checkout when the configured idle
+  interval has elapsed
 - Automatic rollback of open transactions when connections are returned
 
 ## Basic usage
@@ -74,7 +75,7 @@ var pool = new NzConnectionPool(builder);
 | `maxPoolSize` | `10` | Maximum number of connections allowed in the pool |
 | `connectionIdleTimeoutSeconds` | `30` | Seconds before an idle connection is closed |
 | `connectionLifetimeSeconds` | `0` | Max lifetime in seconds (0 = unlimited) |
-| `ConnectionValidationInterval` | `0` | Probe idle connections after this many idle seconds; 0 validates every checkout |
+| `ConnectionValidationInterval` | `30` | Probe idle connections after this many idle seconds; 0 validates every checkout |
 
 Properties available at runtime:
 
@@ -116,5 +117,5 @@ When a connection is returned to the pool, if it has an open transaction (`InTra
 
 ## Performance notes
 
-- Pool validation uses an asynchronous `SELECT 1` probe when a connection is checked. The default interval `0` preserves validation on every checkout. Set a positive `ConnectionValidationInterval` on the builder to skip the probe for recently returned connections; disconnected connections may then be discovered on the next command.
+- Pool validation uses an asynchronous `SELECT 1` probe when a connection is checked. The default interval is `30` seconds: a connection that has been idle for less than 30 seconds is checked out without a probe. Set `ConnectionValidationInterval = 0` to validate on every checkout; disconnected connections may then be discovered on the next command.
 - The maintenance timer runs every 30 seconds on a thread-pool thread.

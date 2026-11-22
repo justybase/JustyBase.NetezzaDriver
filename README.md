@@ -101,7 +101,7 @@ new NzConnection("user", "password", "host", "database", port: 5480);
 // TLS with the cross-driver sslmode spelling
 new NzConnection(
     "Host=host;Database=db;User=user;Password=pass;" +
-    "SslMode=verify-full;SslCertFilePath=C:\\certs\\neteza-ca.pem");
+    "SslMode=verify-full;SslCertFilePath=C:\\certs\\netezza-ca.pem");
 
 // Connection string builder
 var builder = new NzConnectionStringBuilder
@@ -371,7 +371,7 @@ drivers. Certificate validation is **strict by default**.
 ```csharp
 var connection = new NzConnection(
     "Host=host;Database=db;User=user;Password=pass;" +
-    "SslMode=verify-full;SslCertFilePath=C:\\certs\\neteza-ca.pem");
+    "SslMode=verify-full;SslCertFilePath=C:\\certs\\netezza-ca.pem");
 
 connection.Open();
 ```
@@ -440,6 +440,9 @@ dotnet run -c Release -f net10.0 \
   -- --filter *AsyncReaderBench*
 ```
 
+Earlier optimization passes, including rejected experiments and allocation
+details, are recorded in [PERFORMANCE.md](PERFORMANCE.md).
+
 Sample results (Windows 11, .NET 10):
 
 | Scenario | Sync mean | Sync allocated | Async mean | Async allocated | Time ratio |
@@ -479,11 +482,15 @@ Live tests read their configuration from:
 
 - `NZ_DEV_HOST`
 - `NZ_DEV_PORT` (default `5480`)
-- `NZ_DEV_DB`
+- `NZ_DEV_DB` (or `NZ_DEV_DATABASE`)
 - `NZ_DEV_USER`
 - `NZ_DEV_PASSWORD`
 
-No credentials or lab addresses are embedded in the repository.
+No credentials or lab addresses are embedded in the repository. Live tests fail
+fast when the variables are missing. `NZ_DEV_ALLOW_LAB_DEFAULTS=1` opts into the
+disposable-lab defaults and must not be used in CI. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the test categories and benchmark
+commands.
 
 The unit suite includes byte-exact replays of the shared golden wire corpus
 (`src/JustyBase.NetezzaDriver.TestSupport/Fixtures/Wire`), fault injection for
@@ -528,11 +535,18 @@ dotnet run --project tools\JustyBase.NetezzaDriver.Conformance -- \
 
 ## Documentation
 
+- [Connection options](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/connection_options.md)
+- [TLS and text encoding](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/tls_and_encoding.md)
+- [Data types and CLR mapping](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/data_types.md)
 - [Parameters](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/parameters.md)
 - [Connection pooling](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/pooling.md)
+- [Bulk inserts](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/bulk_copy.md)
 - [Metadata API](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/metadata_api.md)
 - [Timeouts and cancellation](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/timeout_and_cancel.md)
 - [Runnable examples](https://github.com/justybase/JustyBase.NetezzaDriver/tree/master/src/examples/JustyBase.NetezzaDriver.Examples)
+- [Contributing](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/CONTRIBUTING.md)
+- [Security policy](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/SECURITY.md)
+- [Changelog](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/CHANGELOG.md)
 
 ## Contributing
 

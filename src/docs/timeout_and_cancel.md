@@ -1,5 +1,17 @@
 # Timeout and Cancel
 
+There are two independent timeouts:
+
+| Setting | Scope | Default |
+|---|---|---:|
+| `Timeout` in the connection string | Opening the TCP/TLS connection | `15` s |
+| `NzConnection.DefaultCommandTimeout` | Commands created by the connection | `60` s |
+| `NzCommand.CommandTimeout` | One command, in seconds | Inherits the connection default |
+
+`Timeout=0` or an invalid value in the connection string falls back to the
+15-second connect default. A command timeout of `0` or
+`Timeout.InfiniteTimeSpan` disables the command deadline.
+
 ## Per-command timeout
 
 Each `NzCommand` supports a `CommandTimeout` property (in seconds). If the query does not complete within the timeout, the driver cancels the query and throws `NetezzaException` with a timeout message.
@@ -34,7 +46,9 @@ Console.WriteLine(cmd1.CommandTimeout); // 30
 cmd1.CommandTimeout = 5;
 ```
 
-If `DefaultCommandTimeout` is not set explicitly, the default is 60 seconds. A timeout of `0` means "no timeout".
+If `DefaultCommandTimeout` is not set explicitly, the default is 60 seconds. A
+command timeout of `0` means "no timeout". The connection-string `Timeout`
+option is unrelated: it controls how long `Open`/`OpenAsync` may take.
 
 ## CancellationToken
 
@@ -71,7 +85,8 @@ This sends a cancel request to the Netezza server. The connection remains open a
 
 - For interactive applications, use `CancellationToken` from the UI layer
 - For batch processing, set `CommandTimeout` to a reasonable value for your workload
-- A timeout of `0` means "no timeout" (wait indefinitely)
+- A command timeout of `0` means "no timeout" (wait indefinitely); the
+  connection-string `Timeout` still bounds only the open operation
 - Timeouts that are too short can cause false positives on slow queries
 - Timeouts that are too long can leave connections blocked
 - Handle timeout failures as `NetezzaException`
