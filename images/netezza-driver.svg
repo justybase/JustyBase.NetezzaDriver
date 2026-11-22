@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+    <title id="title">JustyBase Netezza</title>
+    <desc id="desc">Blue rounded square with the Netezza N logo</desc>
+    <rect width="256" height="256" rx="32" fill="#012d8f" />
+    <circle cx="128" cy="128" r="100" fill="#fbfaf3" stroke="#b6b604" stroke-width="4" />
+
+    <g fill="#02525a">
+        <path d="M74.5 67h35l36.5 53.7V67H181v125h-21.5l-85-125Z" />
+        <path d="M74.5 84l35 51.7V192h-35Z" />
+    </g>
+</svg>

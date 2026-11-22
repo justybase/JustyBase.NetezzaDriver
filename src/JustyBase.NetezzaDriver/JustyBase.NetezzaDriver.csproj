@@ -10,6 +10,7 @@
 	<Description>Pure managed ADO.NET driver for IBM Netezza Performance Server (NPS): synchronous and asynchronous queries, streaming, connection pooling, TLS, catalog metadata, timeouts and structured server diagnostics. No ODBC bridge or native client required.</Description>
 	<PackageProjectUrl>https://github.com/justybase/JustyBase.NetezzaDriver</PackageProjectUrl>
 	<PackageReadmeFile>README.md</PackageReadmeFile>
+	<PackageIcon>images/netezza-driver-icon.png</PackageIcon>
 	<RepositoryUrl>https://github.com/justybase/JustyBase.NetezzaDriver</RepositoryUrl>
 	<Authors>Krzysztof Duśko</Authors>
 	<PackageTags>netezza;nps;ado.net;database;sql;driver;dotnet</PackageTags>
@@ -28,6 +29,18 @@
     <None Include="..\..\README.md">
       <Pack>True</Pack>
       <PackagePath>\</PackagePath>
+    </None>
+    <None Include="..\..\images\netezza-driver.svg">
+      <Pack>True</Pack>
+      <PackagePath>images\</PackagePath>
+    </None>
+    <None Include="..\..\images\netezza-driver-icon.png">
+      <Pack>True</Pack>
+      <PackagePath>images\</PackagePath>
+    </None>
+    <None Include="..\..\images\netezza-driver-badge.png">
+      <Pack>True</Pack>
+      <PackagePath>images\</PackagePath>
     </None>
   </ItemGroup>
 

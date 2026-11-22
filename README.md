@@ -6,6 +6,10 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0%20%7C%2010.0%20%7C%2011.0-512BD4)](https://dotnet.microsoft.com/)
 
+<p align="center">
+  <a href="https://www.nuget.org/packages/JustyBase.NetezzaDriver"><img src="images/netezza-driver-badge.png" alt="JustyBase Netezza ADO.NET driver" width="420"></a>
+</p>
+
 A **pure managed ADO.NET driver** for IBM Netezza Performance Server (NPS).
 No ODBC bridge, no native client library, and no platform-specific runtime
 dependency — just a .NET assembly that speaks the Netezza wire protocol.
