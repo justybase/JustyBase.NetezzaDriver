@@ -1207,3 +1207,71 @@ dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framewo
   `ValueStringBuilder`, ArrayPool ownership: not changed.
 
 ## STOP - DO NOT TOUCH WITHOUT PROFILING.
+
+# P2 maturity pass (2026-11-22)
+
+This pass targeted documentation, repository hygiene and a small set of
+measurable improvements. The only accepted code-path optimization is metadata
+caching; a reader-loop micro-optimization was measured and rejected.
+
+Environment: BenchmarkDotNet 0.16.0-preview.2, `ShortRunJob`, .NET 10.0.15,
+X64 NativeAOT, Windows 11, AMD Ryzen 7 7840HS. Replay fixture
+`dimdate.nzreplay.gz` (3652 rows x 19 columns), loopback server, no appliance.
+
+```powershell
+dotnet run -c Release -f net10.0 --project src\JustyBase.NetezzaDriver.Benchmarks -- `
+  --filter "*Sync_GetColumnSchema*DimDate*"
+```
+
+## Accepted: cache `GetColumnSchema()`
+
+### Problem
+
+`GetSchemaTable()` already cached its `DataTable`, but `GetColumnSchema()`
+rebuilt a `List<DbColumn>` and 19 `NzDbColumn` instances on every call. ORMs and
+schema browsers can call both APIs repeatedly on the same reader.
+
+### After
+
+The first call builds the immutable collection; later calls return the same
+`ReadOnlyCollection<DbColumn>` and the same `NzDbColumn` instances. There is no
+public mutation path: the extended properties use internal setters and the base
+`DbColumn` properties are read-only.
+
+### Measurement
+
+`Sync_GetColumnSchema` calls `GetColumnSchema()` 100 times on one open reader.
+
+| Revision | Mean | Allocated |
+|---|---:|---:|
+| Before | 418.9 us | 427.61 KB |
+| After | 237.2 us | 19.2 KB |
+| Change | **-43.4%** | **-95.5%** |
+
+The first call still allocates the 19-column graph; the benchmark isolates the
+repeated-call path. `NzDataReader` also implements `IDbColumnSchemaGenerator`,
+so the standard `DbDataReaderExtensions.GetColumnSchema` path now returns the
+same cached native `NzDbColumn` objects instead of building `DataRowDbColumn`
+wrappers from `GetSchemaTable`. A regression test asserts reference identity
+across synchronous and asynchronous calls (`AdoNetComplianceTests`).
+
+### Decision
+
+**ACCEPTED.**
+
+## Rejected: direct row access in `GetValues`
+
+`GetValues(object[])` called the public `GetValue(int)` per column, repeating
+`ValidateCanRead`/`ValidateOrdinal`. A direct `_nzCommand.GetValue(i).GetValue()`
+loop was measured to remove those checks:
+
+| Revision | Mean (DimDate) | Allocated |
+|---|---:|---:|
+| Public `GetValue` loop | 1.823 ms | 1.1 MB |
+| Direct row access | 1.819 ms | 1.1 MB |
+
+The difference is well inside run noise; boxing still dominates. The change was
+reverted. `Sync_GetValues` / `Sync_GetValues_Lazy` remain as benchmarks so a
+future allocation-reduction attempt has a baseline.
+
+## STOP - DO NOT TOUCH WITHOUT PROFILING.

@@ -234,9 +234,14 @@ public sealed class AdoNetComplianceTests
             Assert.Equal(0, columns[0].ColumnOrdinal);
             Assert.Equal(18, columns[18].ColumnOrdinal);
             Assert.All(columns, column => Assert.False(string.IsNullOrEmpty(column.ColumnName)));
+            Assert.All(columns, column => Assert.IsType<NzDbColumn>(column));
+
+            // Column metadata is immutable for a reader; repeated calls must
+            // reuse it instead of rebuilding the DbColumn graph.
+            Assert.Same(columns, baseReader.GetColumnSchema());
 
             var asyncColumns = await baseReader.GetColumnSchemaAsync();
-            Assert.Equal(columns.Count, asyncColumns.Count);
+            Assert.Same(columns, asyncColumns);
         }
     }
 

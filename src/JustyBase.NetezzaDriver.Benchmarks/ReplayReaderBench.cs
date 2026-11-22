@@ -120,6 +120,38 @@ public class ReplayReaderBench
     }
 
     [Benchmark]
+    public int Sync_GetValues()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        var values = new object[reader.FieldCount];
+        int rows = 0;
+        while (reader.Read())
+        {
+            reader.GetValues(values);
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark]
+    public int Sync_GetValues_Lazy()
+    {
+        _connection.UseLazyColumnDecoding = true;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        var values = new object[reader.FieldCount];
+        int rows = 0;
+        while (reader.Read())
+        {
+            reader.GetValues(values);
+            rows++;
+        }
+        return rows;
+    }
+
+    [Benchmark]
     public int Sync_FirstColumn()
     {
         _connection.UseLazyColumnDecoding = false;
@@ -244,5 +276,19 @@ public class ReplayReaderBench
         _connection.UseLazyColumnDecoding = false;
         using var command = _connection.CreateCommand(_fixture.Query);
         return command.ExecuteScalar();
+    }
+
+    [Benchmark(Description = "GetColumnSchema x100 on one reader")]
+    public int Sync_GetColumnSchema()
+    {
+        _connection.UseLazyColumnDecoding = false;
+        using var command = _connection.CreateCommand(_fixture.Query);
+        using var reader = command.ExecuteReader();
+        int count = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            count = ((NzDataReader)reader).GetColumnSchema().Count;
+        }
+        return count;
     }
 }

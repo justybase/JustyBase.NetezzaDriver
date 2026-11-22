@@ -8,7 +8,7 @@ using System.Runtime.InteropServices;
 
 namespace JustyBase.NetezzaDriver;
 
-public sealed class NzDataReader : DbDataReader
+public sealed class NzDataReader : DbDataReader, IDbColumnSchemaGenerator
 {
     private readonly NzCommand _nzCommand;
     private readonly NzConnection _nzConnection;
@@ -21,6 +21,7 @@ public sealed class NzDataReader : DbDataReader
     private bool _singleRowFirstRowReturned;
 
     private DataTable? _schemaTable;
+    private ReadOnlyCollection<DbColumn>? _columnSchema;
 
     // Encoded-byte cache for repeated chunked GetBytes on the same string value.
     private string? _getBytesCacheSource;
@@ -967,6 +968,13 @@ public sealed class NzDataReader : DbDataReader
     public ReadOnlyCollection<DbColumn> GetColumnSchema()
     {
         ThrowIfDisposed();
+
+        var cached = _columnSchema;
+        if (cached is not null)
+        {
+            return cached;
+        }
+
         var columns = new List<DbColumn>(FieldCount);
         for (int i = 0; i < FieldCount; i++)
         {
@@ -989,7 +997,9 @@ public sealed class NzDataReader : DbDataReader
             );
             columns.Add(col);
         }
-        return columns.AsReadOnly();
+
+        _columnSchema = columns.AsReadOnly();
+        return _columnSchema;
     }
 
     public int GetProviderType(int ordinal)

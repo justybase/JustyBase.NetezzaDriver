@@ -2,6 +2,16 @@
 
 All notable changes to `JustyBase.NetezzaDriver` are documented here.
 
+## Unreleased
+
+### Changed
+
+- `GetColumnSchema()` caches the immutable `DbColumn` collection per reader;
+  repeated calls no longer rebuild the metadata graph.
+- `NzDataReader` implements `IDbColumnSchemaGenerator`, so
+  `DbDataReaderExtensions.GetColumnSchema` returns provider-native
+  `NzDbColumn` objects instead of rebuilding `DataRowDbColumn` wrappers.
+
 ## 1.12.2
 
 ### Added

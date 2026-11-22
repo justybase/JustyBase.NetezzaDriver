@@ -332,7 +332,11 @@ string declared = reader.GetDeclaredTypeName(0); // e.g. "VARCHAR(32)"
 ```
 
 Each `NzDbColumn` includes `ProviderType`, `TypeModifier` and
-`DeclaredTypeName`.
+`DeclaredTypeName`. The returned collection and column objects are immutable
+and cached for the lifetime of the reader, so repeated schema queries do not
+rebuild the metadata graph. `NzDataReader` implements
+`IDbColumnSchemaGenerator`, so the standard `DbDataReaderExtensions` path
+returns the same native objects instead of `DataRowDbColumn` wrappers.
 
 ## Timeouts and cancellation
 
