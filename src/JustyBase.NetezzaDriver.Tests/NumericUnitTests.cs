@@ -119,4 +119,41 @@ public sealed class NumericUnitTests
         byte[] text = "ab"u8.ToArray();
         Assert.Equal("ab", NzConnectionHelpers.TextRecv(text, 0, 99, null));
     }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(9)]
+    [InlineData(18)]
+    [InlineData(28)]
+    public void NumericPrecisionWithinDecimalRange_AdvertisesDecimal(int precision)
+    {
+        Assert.Equal(typeof(decimal), NumericField(precision).Type);
+        Assert.False(Numeric.ExceedsDecimalPrecision(precision));
+    }
+
+    [Theory]
+    [InlineData(29)]
+    [InlineData(30)]
+    [InlineData(38)]
+    public void NumericPrecisionAboveDecimalRange_AdvertisesString(int precision)
+    {
+        Assert.Equal(typeof(string), NumericField(precision).Type);
+        Assert.True(Numeric.ExceedsDecimalPrecision(precision));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    public void NumericWithoutDeclaredPrecision_AdvertisesDecimal(int typeModifier)
+    {
+        var field = new FieldDescription { TypeOID = 1700, TypeModifier = typeModifier };
+        Assert.Equal(typeof(decimal), field.Type);
+    }
+
+    private static FieldDescription NumericField(int precision)
+        => new()
+        {
+            TypeOID = 1700,
+            TypeModifier = 16 + (precision << 16),
+        };
 }

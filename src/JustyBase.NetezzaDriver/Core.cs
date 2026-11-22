@@ -57,6 +57,42 @@ public enum SecurityLevelCode : int
     OnlySecuredSession = 3
 }
 
+/// <summary>
+/// Transport security policy, mirroring the <c>sslmode</c> values used by the
+/// Rust, Node and Java drivers.
+/// </summary>
+public enum SslMode
+{
+    /// <summary>Require plaintext; fail if the server demands TLS.</summary>
+    Disable = 0,
+
+    /// <summary>Default: ask for plaintext, accept a server-forced TLS upgrade.</summary>
+    Prefer = 1,
+
+    /// <summary>Require TLS. The server certificate is not validated, matching the other drivers.</summary>
+    Require = 2,
+
+    /// <summary>Require TLS and validate the certificate chain, but not the host name.</summary>
+    VerifyCA = 3,
+
+    /// <summary>Require TLS and validate both the certificate chain and the host name.</summary>
+    VerifyFull = 4,
+}
+
+/// <summary>
+/// Encoding of <c>CHAR</c>, <c>VARCHAR</c> and <c>VAR_FIXED_CHAR</c> values on
+/// the binary (DBOS) result path. National character types and the text result
+/// path always use UTF-8. The default matches the other drivers.
+/// </summary>
+public enum CharEncoding
+{
+    /// <summary>ISO-8859-1, the Netezza database encoding in most installations.</summary>
+    Latin1 = 0,
+
+    /// <summary>UTF-8.</summary>
+    Utf8 = 1,
+}
+
 
 //static class FrontendMessageCode
 //{

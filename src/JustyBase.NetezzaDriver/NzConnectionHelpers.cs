@@ -6,7 +6,6 @@ using System.Text;
 internal static class NzConnectionHelpers
 {
     internal static readonly Encoding ClientEncoding = Encoding.UTF8;
-    internal static readonly Encoding CharVarcharEncoding = Encoding.Latin1;
     internal const string NZPY_CLIENT_VERSION = "Release 11.1.0.0";
 
     //add pooling ? 

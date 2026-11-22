@@ -259,17 +259,7 @@ public sealed partial class NzConnection
     [AllowNull]
     public override string ConnectionString
     {
-        get => new NzConnectionStringBuilder()
-        {
-            Host = _host,
-            Database = _database,
-            UserName = _user,
-            Password = _password,
-            Port = _port,
-            Timeout = (int)ConnectionTimeoutDuration.TotalSeconds,
-            LoggerFactory = _loggerFactory,
-            BulkInsert = _bulkInsertEnabled
-        }.ConnectionString;
+        get => CreateConnectionStringBuilder(_password).ConnectionString;
         set
         {
             if (State != ConnectionState.Closed)
@@ -285,28 +275,62 @@ public sealed partial class NzConnection
     private void ApplyConnectionString(string connectionString)
     {
         var parameters = ParseConnectionString(connectionString);
-        _database = parameters.Database ?? string.Empty;
-        _user = parameters.User;
-        _password = parameters.Password;
-        _host = parameters.Host;
-        _port = parameters.Port ?? 5480;
-        _bulkInsertEnabled = parameters.BulkInsert;
-        ConnectionTimeoutDuration = parameters.Timeout.HasValue
-            ? TimeSpan.FromSeconds(parameters.Timeout.Value)
-            : TimeSpan.FromSeconds(15);
+        ApplyIdentity(parameters, databaseOverride: null);
+
+        _sslMode = null;
+        _securityLevel = SecurityLevelCode.PreferredUnsecured;
+        _sslCerFilePath = null;
+        _rejectUnauthorized = true;
+        _verifyHostname = false;
+        _charVarcharEncoding = CharEncoding.Latin1;
+        _charVarcharEncodingImpl = Encoding.Latin1;
+        ApplyTransportOptions(parameters, SecurityLevelCode.PreferredUnsecured, fallbackCertificatePath: null);
     }
 
-    public string SafeConnectionString => new NzConnectionStringBuilder()
+    public string SafeConnectionString =>
+        CreateConnectionStringBuilder(NzConnectionStringBuilder.RedactedPassword).SafeConnectionString;
+
+    private NzConnectionStringBuilder CreateConnectionStringBuilder(string password)
     {
-        Host = _host,
-        Database = _database,
-        UserName = _user,
-        Password = _password,
-        Port = _port,
-        Timeout = (int)ConnectionTimeoutDuration.TotalSeconds,
-        LoggerFactory = _loggerFactory,
-        BulkInsert = _bulkInsertEnabled
-    }.SafeConnectionString;
+        var builder = new NzConnectionStringBuilder
+        {
+            Host = _host,
+            Database = _database,
+            UserName = _user,
+            Password = password,
+            Port = _port,
+            Timeout = (int)ConnectionTimeoutDuration.TotalSeconds,
+            LoggerFactory = _loggerFactory,
+            BulkInsert = _bulkInsertEnabled,
+        };
+
+        if (_sslMode is { } sslMode)
+        {
+            builder.SslMode = sslMode;
+        }
+        else if (_securityLevel != SecurityLevelCode.PreferredUnsecured)
+        {
+            builder.SecurityLevel = _securityLevel;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_sslCerFilePath))
+        {
+            builder.SslCertFilePath = _sslCerFilePath;
+        }
+
+        bool modeDefaultReject = _sslMode != SslMode.Require;
+        if (_rejectUnauthorized != modeDefaultReject)
+        {
+            builder.RejectUnauthorized = _rejectUnauthorized;
+        }
+
+        if (_charVarcharEncoding != CharEncoding.Latin1)
+        {
+            builder.CharVarcharEncoding = _charVarcharEncoding;
+        }
+
+        return builder;
+    }
 
     public override string Database => _database;
 

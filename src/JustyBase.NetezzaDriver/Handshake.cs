@@ -71,6 +71,8 @@ internal sealed class Handshake
     private Stream _stream; // NetworkStream or sslStream
     private readonly string _host = "";
     private readonly string? _sslCerFilePath;
+    private readonly bool _rejectUnauthorized;
+    private readonly bool _verifyHostname;
     private readonly ILogger? _logger = null!;
     private readonly string _guardiumClientOS;
     private readonly string _guardiumClientOSUser;
@@ -86,12 +88,21 @@ internal sealed class Handshake
     //private Dictionary<string, string>? _sslParams;
 
     public ClientTypeId NPSCLIENT_TYPE_PYTHON { get; init; } = ClientTypeId.SqlPython;
-    public Handshake(Socket socket, Stream stream, string host, string? sslCerFilePath, ILoggerFactory? loggerFactory)
+    public Handshake(
+        Socket socket,
+        Stream stream,
+        string host,
+        string? sslCerFilePath,
+        ILoggerFactory? loggerFactory,
+        bool rejectUnauthorized = true,
+        bool verifyHostname = false)
     {
         _usocket = socket;
         _stream = stream;
         _host = host;
         _sslCerFilePath = sslCerFilePath;
+        _rejectUnauthorized = rejectUnauthorized;
+        _verifyHostname = verifyHostname;
         _logger = loggerFactory?.CreateLogger<Handshake>();
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -685,22 +696,7 @@ internal sealed class Handshake
                 PGUtil.WriteInt16(_stream, (short)HSV2_SSL_CONNECT); // 12
 
                 var sslStream = new SslStream(_stream, false);
-                if (_sslCerFilePath is null)
-                {
-                    throw new NetezzaException("A TLS certificate file is required for a secured session.");
-                }
-
-                var certFromPem = X509Certificate2.CreateFromPem(System.IO.File.ReadAllText(_sslCerFilePath));
-                sslStream.AuthenticateAsClient(new SslClientAuthenticationOptions()
-                {
-                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                    AllowRenegotiation = false,
-                    TargetHost = _host,
-                    ClientCertificates = [(X509Certificate)certFromPem],
-                    EnabledSslProtocols = SslProtocols.Tls12,
-                    RemoteCertificateValidationCallback = UserCertificateValidationCallback,
-                    LocalCertificateSelectionCallback = UserCertificateSelectionCallback
-                });
+                sslStream.AuthenticateAsClient(CreateSslClientOptions());
                 _stream = sslStream;
                 _stream.Flush();
                 tlsEstablished = true;
@@ -770,22 +766,7 @@ internal sealed class Handshake
                 await WriteInt16Async(HSV2_SSL_CONNECT, cancellationToken).ConfigureAwait(false);
 
                 var sslStream = new SslStream(_stream, false);
-                if (_sslCerFilePath is null)
-                {
-                    throw new NetezzaException("A TLS certificate file is required for a secured session.");
-                }
-
-                var certFromPem = X509Certificate2.CreateFromPem(System.IO.File.ReadAllText(_sslCerFilePath));
-                await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions()
-                {
-                    CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                    AllowRenegotiation = false,
-                    TargetHost = _host,
-                    ClientCertificates = [(X509Certificate)certFromPem],
-                    EnabledSslProtocols = SslProtocols.Tls12,
-                    RemoteCertificateValidationCallback = UserCertificateValidationCallback,
-                    LocalCertificateSelectionCallback = UserCertificateSelectionCallback
-                }, cancellationToken).ConfigureAwait(false);
+                await sslStream.AuthenticateAsClientAsync(CreateSslClientOptions(), cancellationToken).ConfigureAwait(false);
                 _stream = sslStream;
                 await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 tlsEstablished = true;
@@ -821,29 +802,135 @@ internal sealed class Handshake
         return true;
     }
 
-    private X509Certificate UserCertificateSelectionCallback(object sender, string targetHost, X509CertificateCollection localCertificates, X509Certificate? remoteCertificate, string[] acceptableIssuers)
+    private SslClientAuthenticationOptions CreateSslClientOptions()
     {
-        return localCertificates[0];
+        return new SslClientAuthenticationOptions
+        {
+            CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+            AllowRenegotiation = false,
+            TargetHost = _host.TrimStart('[').TrimEnd(']'),
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            RemoteCertificateValidationCallback = UserCertificateValidationCallback,
+        };
     }
 
-    private bool UserCertificateValidationCallback(object sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors sslPolicyErrors)
+    private bool UserCertificateValidationCallback(
+        object sender,
+        X509Certificate? certificate,
+        X509Chain? chain,
+        SslPolicyErrors sslPolicyErrors)
     {
-        if (sslPolicyErrors == SslPolicyErrors.None)
+        if (!_rejectUnauthorized)
         {
+            _logger?.LogWarning(
+                "TLS certificate validation is disabled; accepting policy errors {SslPolicyErrors}.",
+                sslPolicyErrors);
             return true;
         }
 
-        _logger?.LogError("TLS certificate validation failed with policy errors: {SslPolicyErrors}", sslPolicyErrors);
-        if (chain is not null)
+        if (certificate is null
+            || (sslPolicyErrors & SslPolicyErrors.RemoteCertificateNotAvailable) != 0)
         {
-            foreach (var item in chain.ChainStatus)
+            _logger?.LogError("TLS peer did not provide a usable server certificate.");
+            return false;
+        }
+
+        if (_verifyHostname
+            && (sslPolicyErrors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0)
+        {
+            _logger?.LogError(
+                "TLS server certificate does not match host '{Host}'.",
+                _host);
+            return false;
+        }
+
+        X509Certificate2Collection caCertificates = GetCaCertificates();
+        if (caCertificates.Count > 0)
+        {
+            return ValidateWithCustomTrust(certificate, caCertificates);
+        }
+
+        if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateChainErrors) != 0)
+        {
+            _logger?.LogError(
+                "TLS certificate chain validation failed with policy errors: {SslPolicyErrors}.",
+                sslPolicyErrors);
+            if (chain is not null)
             {
-                var message = item.StatusInformation;
-                _logger?.LogError("ValidateServerCertificate {message}", message);
+                foreach (X509ChainStatus item in chain.ChainStatus)
+                {
+                    _logger?.LogError("ValidateServerCertificate {Message}", item.StatusInformation);
+                }
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool ValidateWithCustomTrust(
+        X509Certificate certificate,
+        X509Certificate2Collection caCertificates)
+    {
+        using var serverCertificate = certificate as X509Certificate2
+            ?? new X509Certificate2(certificate);
+        using var customChain = new X509Chain();
+        customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        customChain.ChainPolicy.CustomTrustStore.AddRange(caCertificates);
+        customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        customChain.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
+
+        bool valid = customChain.Build(serverCertificate);
+        if (!valid)
+        {
+            _logger?.LogError("TLS certificate is not trusted by the configured CA bundle.");
+            foreach (X509ChainStatus item in customChain.ChainStatus)
+            {
+                _logger?.LogError("ValidateServerCertificate {Message}", item.StatusInformation);
             }
         }
 
-        return false;
+        return valid;
+    }
+
+    private readonly object _caCertificateSync = new();
+    private X509Certificate2Collection? _caCertificates;
+
+    private X509Certificate2Collection GetCaCertificates()
+    {
+        if (string.IsNullOrWhiteSpace(_sslCerFilePath))
+        {
+            return [];
+        }
+
+        lock (_caCertificateSync)
+        {
+            if (_caCertificates is not null)
+            {
+                return _caCertificates;
+            }
+
+            var certificates = new X509Certificate2Collection();
+            try
+            {
+                certificates.ImportFromPemFile(_sslCerFilePath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
+            {
+                throw new NetezzaException(
+                    $"Unable to load the TLS CA certificate '{_sslCerFilePath}': {ex.Message}",
+                    ex);
+            }
+
+            if (certificates.Count == 0)
+            {
+                throw new NetezzaException(
+                    $"The TLS CA certificate file '{_sslCerFilePath}' does not contain a PEM certificate.");
+            }
+
+            _caCertificates = certificates;
+            return _caCertificates;
+        }
     }
 
 

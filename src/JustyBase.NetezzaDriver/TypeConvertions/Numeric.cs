@@ -8,6 +8,14 @@ namespace JustyBase.NetezzaDriver.TypeConvertions;
 /// </summary>
 internal sealed class Numeric
 {
+    /// <summary>
+    /// Largest NUMERIC precision that <see cref="decimal"/> can represent
+    /// without silent rounding. Wider values stay exact as strings.
+    /// </summary>
+    internal const int MaxDecimalPrecision = 28;
+
+    internal static bool ExceedsDecimalPrecision(int precision)
+        => precision > MaxDecimalPrecision;
     //public const bool NDIGIT_INT64 = false;
     private const int MAX_NUMERIC_DIGIT_COUNT = 4;
     private const int NUMERIC_MAX_PRECISION = 38;

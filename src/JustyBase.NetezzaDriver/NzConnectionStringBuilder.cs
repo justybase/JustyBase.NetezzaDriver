@@ -16,7 +16,7 @@ namespace JustyBase.NetezzaDriver;
 /// </summary>
 public sealed class NzConnectionStringBuilder : DbConnectionStringBuilder
 {
-    private const string RedactedPassword = "********";
+    internal const string RedactedPassword = "********";
 
     private static readonly string[] UserKeys = ["User", "Username"];
     private static readonly string[] PasswordKeys = ["Password", "Pwd"];
@@ -150,6 +150,90 @@ public sealed class NzConnectionStringBuilder : DbConnectionStringBuilder
         set => this["ConnectionValidationInterval"] = value.ToString(CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// Transport security policy. Setting this removes any <c>SecurityLevel</c>
+    /// key because the two options are mutually exclusive.
+    /// </summary>
+    public SslMode SslMode
+    {
+        get => TryGetString(NzOptionParser.SslModeKeys, out var value)
+            && NzOptionParser.TryParseSslMode(value, out var mode)
+                ? mode
+                : SslMode.Prefer;
+        set
+        {
+            Remove("SecurityLevel");
+            this["SslMode"] = NzOptionParser.ToConnectionString(value);
+        }
+    }
+
+    /// <summary>
+    /// Low-level handshake security level. Prefer <see cref="SslMode"/> for new
+    /// applications; setting this removes any <c>SslMode</c> key.
+    /// </summary>
+    public SecurityLevelCode SecurityLevel
+    {
+        get => TryGetString(NzOptionParser.SecurityLevelKeys, out var value)
+            && NzOptionParser.TryParseSecurityLevel(value, out var level)
+                ? level
+                : SecurityLevelCode.PreferredUnsecured;
+        set
+        {
+            Remove("SslMode");
+            this["SecurityLevel"] = value.ToString();
+        }
+    }
+
+    /// <summary>PEM file with one or more trusted CA certificates for TLS.</summary>
+    public string SslCertFilePath
+    {
+        get => GetString(NzOptionParser.SslCertificateKeys, string.Empty);
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                Remove("SslCertFilePath");
+                Remove("SslCerFilePath");
+                Remove("Ssl_Cert");
+                Remove("SslCert");
+            }
+            else
+            {
+                this["SslCertFilePath"] = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Validates the server certificate. Defaults to true. <c>SslMode=require</c>
+    /// implies false unless this option is set explicitly.
+    /// </summary>
+    public bool RejectUnauthorized
+    {
+        get => GetBool("RejectUnauthorized", true);
+        set => this["RejectUnauthorized"] = value.ToString();
+    }
+
+    /// <summary>Encoding of CHAR/VARCHAR values on the binary result path.</summary>
+    public CharEncoding CharVarcharEncoding
+    {
+        get => TryGetString(NzOptionParser.CharVarcharEncodingKeys, out var value)
+            && NzOptionParser.TryParseCharEncoding(value, out var encoding)
+                ? encoding
+                : CharEncoding.Latin1;
+        set
+        {
+            if (value == CharEncoding.Latin1)
+            {
+                Remove("CharVarcharEncoding");
+            }
+            else
+            {
+                this["CharVarcharEncoding"] = NzOptionParser.ToConnectionString(value);
+            }
+        }
+    }
+
     public string SafeConnectionString => ToSafeString();
 
     public override string ToString() => ConnectionString;
@@ -175,7 +259,28 @@ public sealed class NzConnectionStringBuilder : DbConnectionStringBuilder
             ConnectionLifetime = ConnectionLifetime,
             BulkInsert = BulkInsert,
             ConnectionValidationInterval = ConnectionValidationInterval,
+            CharVarcharEncoding = CharVarcharEncoding,
         };
+
+        if (SslMode != SslMode.Prefer)
+        {
+            safe.SslMode = SslMode;
+        }
+        else if (SecurityLevel != SecurityLevelCode.PreferredUnsecured)
+        {
+            safe.SecurityLevel = SecurityLevel;
+        }
+
+        if (!string.IsNullOrEmpty(SslCertFilePath))
+        {
+            safe.SslCertFilePath = SslCertFilePath;
+        }
+
+        if (!RejectUnauthorized)
+        {
+            safe.RejectUnauthorized = false;
+        }
+
         return safe.ConnectionString;
     }
 
@@ -193,6 +298,21 @@ public sealed class NzConnectionStringBuilder : DbConnectionStringBuilder
         }
 
         return fallback;
+    }
+
+    private bool TryGetString(string[] keys, out string value)
+    {
+        foreach (var key in keys)
+        {
+            if (TryGetValue(key, out var raw) && raw is not null)
+            {
+                value = Convert.ToString(raw, CultureInfo.InvariantCulture) ?? string.Empty;
+                return true;
+            }
+        }
+
+        value = string.Empty;
+        return false;
     }
 
     private int GetInt(string key, int fallback)

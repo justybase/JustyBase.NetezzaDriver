@@ -1,4 +1,5 @@
 using JustyBase.NetezzaDriver.StringPool;
+using JustyBase.NetezzaDriver.TypeConvertions;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -74,9 +75,10 @@ internal sealed class FieldDescription
         // Decimal holds at most 29 significant digits. Wider NUMERIC values
         // are surfaced as exact strings by the row decoder, so the advertised
         // field type must agree with the actual value.
-        1700 => TypeModifier > 16 && ((TypeModifier - 16) >> 16) > 28
-            ? typeof(string)
-            : typeof(decimal),
+        1700 => TypeModifier > 16
+            && Numeric.ExceedsDecimalPrecision((TypeModifier - 16) >> 16)
+                ? typeof(string)
+                : typeof(decimal),
         2500 => typeof(Int16),// Byteint not SByte bocouse of ODBC compatibility.. (mailny for green test and compliance)
         2522 => typeof(string), // nchar
         2530 => typeof(string), // Nvarchar

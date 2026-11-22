@@ -159,7 +159,7 @@ public sealed class NzCommand : DbCommand
     //    return NewPreparedStatement.Description![fieldNum].TypeOID;
     //}
 
-    public int FieldCount => NewPreparedStatement?.FieldCount ?? -1;
+    public int FieldCount => NewPreparedStatement?.FieldCount ?? 0;
 
     /// <summary>
     /// do not use this method, it is for internal use only

@@ -20,6 +20,7 @@ public sealed class WireReplayTests
     private sealed record QueryOutcome(
         string Sql,
         int FieldCount,
+        Type[] FieldTypes,
         List<object?[]> Rows,
         Exception? Error,
         IReadOnlyList<string> Notices);
@@ -84,6 +85,7 @@ public sealed class WireReplayTests
         var outcomes = await ExecuteAll(Load("dbos_types.bin"));
         Assert.Equal(4, outcomes.Count);
         Assert.All(outcomes.Take(3), outcome => Assert.Null(outcome.Error));
+        Assert.All(outcomes.Take(3), outcome => Assert.Equal(0, outcome.FieldCount));
 
         QueryOutcome select = outcomes[3];
         Assert.Null(select.Error);
@@ -146,6 +148,7 @@ public sealed class WireReplayTests
         QueryOutcome binary = outcomes[5];
         Assert.Null(binary.Error);
         Assert.Equal(4, binary.Rows.Count);
+        Assert.Equal(typeof(string), binary.FieldTypes[1]);
         Assert.Equal(
             ["1", "2", "3", "4"],
             binary.Rows.Select(row => Text(row[0])).ToArray());
@@ -160,6 +163,7 @@ public sealed class WireReplayTests
 
         QueryOutcome text = outcomes[6];
         Assert.Null(text.Error);
+        Assert.Equal(typeof(string), text.FieldTypes[1]);
         object?[] textRow = Assert.Single(text.Rows);
         Assert.Equal("9999999999999999999.9999999999999999999", Text(textRow[0]));
         Assert.Equal("-0.0000000000000000001", Text(textRow[1]));
@@ -347,6 +351,11 @@ public sealed class WireReplayTests
             {
                 using var reader = command.ExecuteReader();
                 int fields = reader.FieldCount;
+                var fieldTypes = new Type[fields];
+                for (int i = 0; i < fields; i++)
+                {
+                    fieldTypes[i] = reader.GetFieldType(i);
+                }
                 var rows = new List<object?[]>();
                 while (reader.Read())
                 {
@@ -357,11 +366,11 @@ public sealed class WireReplayTests
                     }
                     rows.Add(row);
                 }
-                outcomes.Add(new QueryOutcome(record.Sql, fields, rows, null, command.Notices.ToArray()));
+                outcomes.Add(new QueryOutcome(record.Sql, fields, fieldTypes, rows, null, command.Notices.ToArray()));
             }
             catch (Exception error)
             {
-                outcomes.Add(new QueryOutcome(record.Sql, 0, [], error, command.Notices.ToArray()));
+                outcomes.Add(new QueryOutcome(record.Sql, 0, [], [], error, command.Notices.ToArray()));
             }
         }
         return outcomes;

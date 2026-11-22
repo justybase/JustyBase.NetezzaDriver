@@ -13,7 +13,7 @@ internal sealed class PreparedStatement
     /// <summary>
     /// Gets the number of fields in the row description.
     /// </summary>
-    public int FieldCount => Description?.FieldCount ?? -1;
+    public int FieldCount => Description?.FieldCount ?? 0;
 
     /// <summary>
     /// Gets or sets the SQL query of the prepared statement.

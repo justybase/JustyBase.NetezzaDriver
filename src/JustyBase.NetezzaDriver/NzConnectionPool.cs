@@ -14,6 +14,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
     private readonly string _user;
     private readonly string _password;
     private readonly int _port;
+    private readonly string? _connectionString;
     private readonly int _minPoolSize;
     private readonly int _maxPoolSize;
     private readonly TimeSpan _idleTimeout;
@@ -49,13 +50,15 @@ public sealed class NzConnectionPool : IAsyncDisposable
         int connectionIdleTimeoutSeconds = 30, int connectionLifetimeSeconds = 0)
         : this(host, database, user, password, port, minPoolSize, maxPoolSize,
               connectionIdleTimeoutSeconds, connectionLifetimeSeconds,
-              NzConnectionStringBuilder.DefaultConnectionValidationInterval)
+              NzConnectionStringBuilder.DefaultConnectionValidationInterval,
+              template: null)
     {
     }
 
     private NzConnectionPool(string host, string database, string user, string password,
         int port, int minPoolSize, int maxPoolSize, int connectionIdleTimeoutSeconds,
-        int connectionLifetimeSeconds, int connectionValidationIntervalSeconds)
+        int connectionLifetimeSeconds, int connectionValidationIntervalSeconds,
+        NzConnectionStringBuilder? template)
     {
         if (connectionValidationIntervalSeconds < 0)
             throw new ArgumentOutOfRangeException(nameof(connectionValidationIntervalSeconds));
@@ -65,6 +68,7 @@ public sealed class NzConnectionPool : IAsyncDisposable
         _user = user ?? throw new ArgumentNullException(nameof(user));
         _password = password ?? throw new ArgumentNullException(nameof(password));
         _port = port;
+        _connectionString = template?.ConnectionString;
         _minPoolSize = minPoolSize;
         _maxPoolSize = maxPoolSize > 0 ? maxPoolSize : 10;
         _idleTimeout = TimeSpan.FromSeconds(connectionIdleTimeoutSeconds > 0 ? connectionIdleTimeoutSeconds : 30);
@@ -78,8 +82,42 @@ public sealed class NzConnectionPool : IAsyncDisposable
         : this(builder.Host, builder.Database, builder.UserName, builder.Password,
               builder.Port, builder.MinPoolSize, builder.MaxPoolSize,
               builder.ConnectionIdleTimeout, builder.ConnectionLifetime,
-              builder.ConnectionValidationInterval)
+              builder.ConnectionValidationInterval,
+              CreateConnectionTemplate(builder))
     {
+    }
+
+    /// <summary>
+    /// Copies the connection-level options (TLS, encoding, timeout) but not the
+    /// pool sizing keys into a template used for each physical connection.
+    /// </summary>
+    private static NzConnectionStringBuilder CreateConnectionTemplate(NzConnectionStringBuilder builder)
+    {
+        var template = new NzConnectionStringBuilder();
+        foreach (string key in builder.Keys)
+        {
+            switch (key.ToLowerInvariant())
+            {
+                case "pooling":
+                case "minpoolsize":
+                case "maxpoolsize":
+                case "connectionidletimeout":
+                case "connectionlifetime":
+                case "connectionvalidationinterval":
+                    continue;
+                default:
+                    template[key] = builder[key];
+                    break;
+            }
+        }
+
+        if (template.TryGetValue("Timeout", out object? timeout)
+            && Convert.ToInt32(timeout, System.Globalization.CultureInfo.InvariantCulture) <= 0)
+        {
+            template.Remove("Timeout");
+        }
+
+        return template;
     }
 
     public int ActiveCount => _active.Count;
@@ -454,7 +492,9 @@ public sealed class NzConnectionPool : IAsyncDisposable
     /// </summary>
     private async Task<NzConnection> CreateConnectionAsync(CancellationToken cancellationToken)
     {
-        var connection = new NzConnection(_user, _password, _host, _database, _port);
+        var connection = _connectionString is null
+            ? new NzConnection(_user, _password, _host, _database, _port)
+            : new NzConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         return connection;
     }

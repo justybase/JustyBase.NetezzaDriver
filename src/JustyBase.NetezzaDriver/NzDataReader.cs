@@ -55,8 +55,26 @@ public sealed class NzDataReader : DbDataReader
         }
     }
 
-    internal static NzDataReader CreateForTests(NzCommand nzCommand)
-        => new(nzCommand, initializeReader: false);
+    internal static NzDataReader CreateForTests(NzCommand nzCommand, int fieldCount = 1)
+    {
+        if (fieldCount > 0 && nzCommand.NewPreparedStatement?.Description is null)
+        {
+            var description = new RowDescriptionMessage(fieldCount);
+            for (int i = 0; i < fieldCount; i++)
+            {
+                description[i] = new FieldDescription
+                {
+                    Name = $"column{i + 1}",
+                    TypeOID = 25,
+                    TypeSize = -1,
+                    TypeModifier = -1,
+                };
+            }
+            nzCommand.NewPreparedStatement = new PreparedStatement { Description = description };
+        }
+
+        return new(nzCommand, initializeReader: false);
+    }
 
     internal static async Task<NzDataReader> CreateAsync(NzCommand nzCommand, CancellationToken cancellationToken = default)
     {

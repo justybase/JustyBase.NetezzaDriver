@@ -482,7 +482,7 @@ public sealed partial class NzConnection
                 case NzTypeJsonpath:
                     {
                         int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                        string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
+                        string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), _charVarcharEncodingImpl);
                         rowValue.typeCode = TypeCodeEx.String;
                         rowValue.stringValue = value;
                         if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
@@ -513,7 +513,7 @@ public sealed partial class NzConnection
                         // CHAR is blank-padded in the binary row format. The
                         // shared wire corpus (and the Rust/Node/Python drivers)
                         // expose the logical value without the padding.
-                        string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding)
+                        string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), _charVarcharEncodingImpl)
                             .TrimEnd(' ');
                         rowValue.typeCode = TypeCodeEx.String;
                         rowValue.stringValue = value;
@@ -690,9 +690,10 @@ public sealed partial class NzConnection
         // System.Decimal has at most 29 significant digits. A NUMERIC(38,19)
         // value fits in decimal's magnitude but not its precision: parsing it
         // would silently round (for example 9999999999999999999.9999999999999999999
-        // became 10000000000000000000.000000000). Keep wide numerics exact as
-        // text, matching the Rust/Node/Python drivers.
-        if (prec > 28)
+        // became 10000000000000000000.000000000). Keep every value whose
+        // declared precision exceeds decimal's range exact as text, matching
+        // RowDescriptionMessage.GetFieldType and the other drivers.
+        if (Numeric.ExceedsDecimalPrecision(prec))
         {
             rowValue.typeCode = TypeCodeEx.String;
             rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
@@ -705,14 +706,14 @@ public sealed partial class NzConnection
         {
             value = Numeric.GetCsNumeric(fieldDataP, prec, scale, count);
         }
-        catch (OverflowException)
+        catch (OverflowException ex)
         {
-            // System.Decimal tops out at ~7.9e28. Wider NUMERIC values
-            // (up to NUMERIC(38)) stay exact as text.
-            rowValue.typeCode = TypeCodeEx.String;
-            rowValue.stringValue = Numeric.GetNumericString(fieldDataP, prec, scale, count);
-            if (logDebug) _logger?.LogDebug("field={Field}, datatype=NUMERIC, value={Value}", curField + 1, rowValue.stringValue);
-            return;
+            // Precision <= 28 always fits System.Decimal; reaching this branch
+            // means the descriptor and the payload disagree. Fail rather than
+            // silently changing the advertised field type.
+            throw new InvalidCastException(
+                $"Column {curField + 1} is declared NUMERIC({prec},{scale}) but its value does not fit System.Decimal.",
+                ex);
         }
         catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException or InvalidCastException)
         {
@@ -746,7 +747,7 @@ public sealed partial class NzConnection
             case NzTypeJsonpath:
                 {
                     int cursize = BitConverter.ToUInt16(fieldDataP) - 2;
-                    string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), NzConnectionHelpers.CharVarcharEncoding);
+                    string value = GetStandardString(curField, fieldDataP.Slice(2, cursize), _charVarcharEncodingImpl);
                     rowValue.typeCode = TypeCodeEx.String;
                     rowValue.stringValue = value;
                     if (logDebug) _logger?.LogDebug("field={Field}, datatype={Datatype}, value={Value}", curField + 1, fldtype.ToString(), value);
@@ -776,7 +777,7 @@ public sealed partial class NzConnection
                 {
                     // See the synchronous decoder: CHAR padding is not part of
                     // the logical value.
-                    string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), NzConnectionHelpers.CharVarcharEncoding)
+                    string value = GetStandardString(curField, fieldDataP.Slice(0, fldlen), _charVarcharEncodingImpl)
                         .TrimEnd(' ');
                     rowValue.typeCode = TypeCodeEx.String;
                     rowValue.stringValue = value;
@@ -1208,8 +1209,9 @@ public sealed partial class NzConnection
                                 : 0;
                             // decimal has 29 significant digits at most. Parsing a
                             // wider NUMERIC rounds silently, so keep the server's
-                            // exact text instead.
-                            if (precision > 28)
+                            // exact text instead. The declared precision decides
+                            // the CLR type; it never depends on the row value.
+                            if (Numeric.ExceedsDecimalPrecision(precision))
                             {
                                 rowValue.typeCode = TypeCodeEx.String;
                                 rowValue.stringValue = Encoding.ASCII.GetString(data, dataIdx, vlen - 4);
@@ -1221,10 +1223,12 @@ public sealed partial class NzConnection
                                 rowValue.typeCode = TypeCodeEx.Decimal;
                                 rowValue.decimalValue = NzConnectionHelpers.NumericInTyped(data, dataIdx, vlen - 4);
                             }
-                            catch (OverflowException)
+                            catch (OverflowException ex)
                             {
-                                rowValue.typeCode = TypeCodeEx.String;
-                                rowValue.stringValue = Encoding.ASCII.GetString(data, dataIdx, vlen - 4);
+                                throw new InvalidCastException(
+                                    $"Column {columnNumber + 1} returned a NUMERIC value outside System.Decimal range. " +
+                                    "Cast the column to NUMERIC(38,s) to read it as exact text.",
+                                    ex);
                             }
                             break;
                         }

@@ -98,12 +98,10 @@ while (await reader.ReadAsync())
 new NzConnection("user", "password", "host", "database");
 new NzConnection("user", "password", "host", "database", port: 5480);
 
-// TLS
+// TLS with the cross-driver sslmode spelling
 new NzConnection(
-    "user", "password", "host", "database",
-    port: 5480,
-    securityLevel: SecurityLevelCode.OnlySecuredSession,
-    sslCerFilePath: @"C:\certs\netezza.pem");
+    "Host=host;Database=db;User=user;Password=pass;" +
+    "SslMode=verify-full;SslCertFilePath=C:\\certs\\neteza-ca.pem");
 
 // Connection string builder
 var builder = new NzConnectionStringBuilder
@@ -116,7 +114,10 @@ var builder = new NzConnectionStringBuilder
     Pooling = true,
     MinPoolSize = 1,
     MaxPoolSize = 10,
-    BulkInsert = true   // NzBulkCopy external-table transfer (default)
+    BulkInsert = true,   // NzBulkCopy external-table transfer (default)
+    SslMode = SslMode.VerifyFull,
+    SslCertFilePath = @"C:\certs\netezza-ca.pem",
+    CharVarcharEncoding = CharEncoding.Latin1,
 };
 
 using var connection = new NzConnection(builder.ConnectionString);
@@ -132,12 +133,13 @@ connection.Open();
 | Named parameters | ✅ | `:name` and `@name` |
 | Positional parameters | ✅ | `?` |
 | Connection pooling | ✅ | Min/max size, idle timeout, lifetime, validation |
-| Transactions | ✅ | `ReadCommitted`, explicit commit/rollback |
+| Transactions | ✅ | `ReadCommitted`, explicit commit/rollback, no nesting |
 | Column metadata | ✅ | Standard schema plus `ProviderType`, `TypeModifier`, declared type |
 | Catalog introspection | ✅ | Schemas, tables, columns, views, procedures, keys, sizes, sessions |
 | Command timeout | ✅ | Per connection and per command |
 | Query cancellation | ✅ | `CancelQuery` and `CancellationToken` |
-| TLS / certificate validation | ✅ | Strict validation by default |
+| TLS / certificate validation | ✅ | `sslmode=disable/prefer/require/verify-ca/verify-full` |
+| Binary text encoding | ✅ | `CharVarcharEncoding=latin1/utf8` for DBOS `CHAR`/`VARCHAR` |
 | Streaming rows | ✅ | Reader and mapped async enumeration |
 | Bulk copy | ✅ | `NzBulkCopy` streams text rows through the external-table protocol |
 | Structured server errors | ✅ | SQLSTATE, severity, detail, hint, raw response |
@@ -183,6 +185,19 @@ var count = await command2.ExecuteScalarAsync();
 | `Guid` | `'guid'` |
 
 See [`src/docs/parameters.md`](https://github.com/justybase/JustyBase.NetezzaDriver/blob/master/src/docs/parameters.md) for the full reference.
+
+### Result type mapping
+
+`NUMERIC` columns whose declared precision is at most 28 are returned as
+`decimal` and `GetFieldType` reports `typeof(decimal)`. Precision 29–38 is
+returned as the server's exact decimal text (`string`), because `System.Decimal`
+has only 29 significant digits and silently rounds wider values. The CLR type is
+chosen from the declared precision, never from an individual row value.
+
+`CHAR`/`VARCHAR` values on the binary (DBOS) path are decoded as Latin-1 by
+default, matching the Rust, Node and Python drivers. Databases that store those
+columns as UTF-8 can set `CharVarcharEncoding=utf8` in the connection string.
+`NCHAR`/`NVARCHAR` and the text result path always use UTF-8.
 
 ## Bulk inserts
 
@@ -342,17 +357,32 @@ for details.
 
 ## TLS and security
 
-TLS certificate validation is **strict by default**. Certificates with policy or
-chain errors are rejected.
+The driver accepts the same `sslmode` values as the Rust, Node and Java
+drivers. Certificate validation is **strict by default**.
+
+| `SslMode` | Handshake | Server certificate |
+|---|---|---|
+| `disable` | plaintext only; fails if the server requires TLS | not checked |
+| `prefer` (default) | plaintext, upgraded if the server requires TLS | chain and host |
+| `require` | TLS required | not checked |
+| `verify-ca` | TLS required | chain only (host name may differ) |
+| `verify-full` | TLS required | chain and host |
 
 ```csharp
 var connection = new NzConnection(
-    "user", "password", "host", "database",
-    securityLevel: SecurityLevelCode.OnlySecuredSession,
-    sslCerFilePath: @"C:\path\to\certificate.pem");
+    "Host=host;Database=db;User=user;Password=pass;" +
+    "SslMode=verify-full;SslCertFilePath=C:\\certs\\neteza-ca.pem");
 
 connection.Open();
 ```
+
+`SslCertFilePath` is a PEM bundle of trusted CA certificates, matching the
+`sslCerFilePath` option in the other drivers. `RejectUnauthorized=false` is
+available for private labs, but combining it with `verify-ca` or `verify-full`
+is rejected instead of silently weakening the requested policy. The legacy
+`SecurityLevel=PreferredUnsecured|OnlyUnsecuredSession|PreferredSecuredSession|OnlySecuredSession`
+spelling and constructor enum remain available; `SslMode` and `SecurityLevel`
+cannot be combined in one connection string.
 
 ## ADO.NET coverage
 
@@ -365,7 +395,7 @@ connection.Open();
 | `DbTransaction` | `NzTransaction` |
 | `DbProviderFactory` | `NzFactory.Instance` |
 | `DbConnectionStringBuilder` | `NzConnectionStringBuilder` |
-| `IsolationLevel` | `ReadCommitted` and `Unspecified` |
+| `IsolationLevel` | `ReadCommitted` and `Unspecified`; other levels and nested transactions throw |
 | `ChangeDatabase` | `SET CATALOG`; rejected during an active transaction |
 
 ### Provider factory and connection strings

@@ -50,8 +50,55 @@ public sealed class TransactionReplayTests
         Assert.Contains("rollback", server.Queries.Select(sql => sql.ToLowerInvariant()));
 
         Assert.Throws<NotSupportedException>(() => connection.BeginTransaction(IsolationLevel.Serializable));
+        Assert.Throws<NotSupportedException>(() => connection.BeginTransaction(IsolationLevel.RepeatableRead));
+        Assert.Throws<NotSupportedException>(() => connection.BeginTransaction(IsolationLevel.Snapshot));
         connection.Close();
         Assert.Throws<InvalidOperationException>(() => connection.BeginTransaction());
+    }
+
+    [Fact]
+    public async Task BeginTransaction_RejectsNestedTransactionsAndKeepsTheOuterOne()
+    {
+        var options = new NzReplayOptions
+        {
+            ResponseOverride = (sql, _) => sql.Trim().ToLowerInvariant() switch
+            {
+                "begin" => BackendTestMessages.Success("BEGIN"),
+                "rollback" => BackendTestMessages.Success("ROLLBACK"),
+                _ => null,
+            },
+        };
+
+        await using var server = NzReplayServer.Start(NzReplayFixture.LoadShipped("dimdate.nzreplay.gz"), options);
+        using var connection = Open(server.Port);
+        using var transaction = connection.BeginTransaction();
+
+        var error = Assert.Throws<InvalidOperationException>(() => connection.BeginTransaction());
+        Assert.Contains("nested", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(connection.InTransaction);
+        transaction.Rollback();
+        Assert.False(connection.InTransaction);
+    }
+
+    [Fact]
+    public async Task BeginTransaction_UnspecifiedIsolation_BecomesReadCommitted()
+    {
+        var options = new NzReplayOptions
+        {
+            ResponseOverride = (sql, _) => sql.Trim().ToLowerInvariant() switch
+            {
+                "begin" => BackendTestMessages.Success("BEGIN"),
+                "commit" => BackendTestMessages.Success("COMMIT"),
+                _ => null,
+            },
+        };
+
+        await using var server = NzReplayServer.Start(NzReplayFixture.LoadShipped("dimdate.nzreplay.gz"), options);
+        using var connection = Open(server.Port);
+        using var transaction = connection.BeginTransaction(IsolationLevel.Unspecified);
+
+        Assert.Equal(IsolationLevel.ReadCommitted, transaction.IsolationLevel);
+        transaction.Commit();
     }
 
     private static NzConnection Open(int port)

@@ -6,7 +6,7 @@
 	<IsAotCompatible>true</IsAotCompatible>
 	<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 	<Title>ADO.NET driver for IBM Netezza</Title>
-	<Version>1.12.1</Version>
+	<Version>1.12.2</Version>
 	<Description>Pure managed ADO.NET driver for IBM Netezza Performance Server (NPS): synchronous and asynchronous queries, streaming, connection pooling, TLS, catalog metadata, timeouts and structured server diagnostics. No ODBC bridge or native client required.</Description>
 	<PackageProjectUrl>https://github.com/justybase/JustyBase.NetezzaDriver</PackageProjectUrl>
 	<PackageReadmeFile>README.md</PackageReadmeFile>
@@ -14,7 +14,7 @@
 	<RepositoryUrl>https://github.com/justybase/JustyBase.NetezzaDriver</RepositoryUrl>
 	<Authors>Krzysztof Duśko</Authors>
 	<PackageTags>netezza;nps;ado.net;database;sql;driver;dotnet</PackageTags>
-	<PackageReleaseNotes>1.12.1: exact NUMERIC(29..38) text in binary and text rows; correct negative interval and TIMETZ formatting; CHAR padding trimmed for DBOS rows; closed-reader getters throw InvalidOperationException; shared golden wire corpus, replay fault injection, seeded fuzz tests, format and coverage CI gates.</PackageReleaseNotes>
+	<PackageReleaseNotes>1.12.2: cross-driver sslmode (disable/prefer/require/verify-ca/verify-full) with a CA bundle instead of a client certificate, CharVarcharEncoding=latin1/utf8 for DBOS CHAR/VARCHAR, deterministic NUMERIC typing (decimal up to 28 digits, exact string above), ReadCommitted-only transactions with nested-transaction rejection, zero FieldCount for non-query readers, and NzConnection split into protocol, execution, external-table, result and buffer partials.</PackageReleaseNotes>
 	<PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
 	 <!--<PackageLicenseFile>LICENSE</PackageLicenseFile>-->
 	<PackageRequireLicenseAcceptance>True</PackageRequireLicenseAcceptance>

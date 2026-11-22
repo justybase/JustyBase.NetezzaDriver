@@ -57,10 +57,10 @@ public sealed partial class NzConnection : DbConnection
 
     public int Pid => _backendKeyData?.BackendProcessId ?? -1;
 
-    private string _database;
-    private string _user;
-    private string _password;
-    private string _host;
+    private string _database = string.Empty;
+    private string _user = string.Empty;
+    private string _password = string.Empty;
+    private string _host = string.Empty;
     private int _port;
     private bool _bulkInsertEnabled = true;
 
@@ -137,18 +137,8 @@ public sealed partial class NzConnection : DbConnection
 
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<NzConnection>();
-        _securityLevel = securityLevel;
-        _sslCerFilePath = sslCerFilePath;
-        _database = parameters.Database ?? "";
-        _user = parameters.User;
-        _password = parameters.Password;
-        _host = parameters.Host;
-        _port = parameters.Port ?? 5480;
-        _bulkInsertEnabled = parameters.BulkInsert;
-        if (parameters.Timeout.HasValue)
-        {
-            ConnectionTimeoutDuration = TimeSpan.FromSeconds(parameters.Timeout.Value);
-        }
+        ApplyIdentity(parameters, databaseOverride: null);
+        ApplyTransportOptions(parameters, securityLevel, sslCerFilePath);
         _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
     }
 
@@ -158,30 +148,79 @@ public sealed partial class NzConnection : DbConnection
 
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<NzConnection>();
-        _securityLevel = securityLevel;
-        _sslCerFilePath = sslCerFilePath;
-        _database = database;
+        ApplyIdentity(parameters, databaseOverride: database);
+        ApplyTransportOptions(parameters, securityLevel, sslCerFilePath);
+        _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
+        this.CommandTimeout = TimeSpan.FromSeconds(commandTimeoutSec);
+    }
+
+    private void ApplyIdentity(NzConnectionSettings parameters, string? databaseOverride)
+    {
+        _database = databaseOverride ?? parameters.Database ?? string.Empty;
         _user = parameters.User;
         _password = parameters.Password;
         _host = parameters.Host;
         _port = parameters.Port ?? 5480;
         _bulkInsertEnabled = parameters.BulkInsert;
-        if (parameters.Timeout.HasValue)
-        {
-            ConnectionTimeoutDuration = TimeSpan.FromSeconds(parameters.Timeout.Value);
-        }
-        _tmp_buffer = ArrayPool<byte>.Shared.Rent(4096);
-        this.CommandTimeout = TimeSpan.FromSeconds(commandTimeoutSec);
+        ConnectionTimeoutDuration = parameters.Timeout.HasValue
+            ? TimeSpan.FromSeconds(parameters.Timeout.Value)
+            : TimeSpan.FromSeconds(15);
     }
 
+    private void ApplyTransportOptions(
+        NzConnectionSettings parameters,
+        SecurityLevelCode fallbackSecurityLevel,
+        string? fallbackCertificatePath)
+    {
+        _sslCerFilePath = string.IsNullOrWhiteSpace(parameters.SslCertFilePath)
+            ? fallbackCertificatePath
+            : parameters.SslCertFilePath;
+        _charVarcharEncoding = parameters.CharVarcharEncoding;
+        _charVarcharEncodingImpl = NzOptionParser.ToEncoding(_charVarcharEncoding);
+
+        if (parameters.SslMode is { } sslMode)
+        {
+            _sslMode = sslMode;
+            ApplySslMode(sslMode, parameters.RejectUnauthorized);
+            return;
+        }
+
+        _sslMode = null;
+        _securityLevel = parameters.SecurityLevel ?? fallbackSecurityLevel;
+        _rejectUnauthorized = parameters.RejectUnauthorized ?? true;
+        _verifyHostname = _rejectUnauthorized;
+    }
+
+    private void ApplySslMode(SslMode sslMode, bool? rejectUnauthorized)
+    {
+        if (rejectUnauthorized == false && sslMode is SslMode.VerifyCA or SslMode.VerifyFull)
+        {
+            throw new NetezzaException(
+                $"SslMode={NzOptionParser.ToConnectionString(sslMode)} requires certificate validation; " +
+                "RejectUnauthorized=False is not allowed.");
+        }
+
+        _securityLevel = sslMode switch
+        {
+            SslMode.Disable => SecurityLevelCode.OnlyUnsecuredSession,
+            SslMode.Prefer => SecurityLevelCode.PreferredUnsecured,
+            _ => SecurityLevelCode.OnlySecuredSession,
+        };
+        _rejectUnauthorized = rejectUnauthorized ?? sslMode != SslMode.Require;
+        // verify-ca explicitly checks the chain only; plaintext has no peer
+        // certificate to check. Every other validating mode also checks that
+        // the certificate matches the requested host.
+        _verifyHostname = sslMode is not (SslMode.Disable or SslMode.VerifyCA)
+            && _rejectUnauthorized;
+    }
 
     /// <summary>
     /// Parses a connection string into its component parts, supporting passwords that may contain semicolons when enclosed in curly braces.
     /// </summary>
     /// <param name="connectionString">Connection string in format "User=value;Password=value" or "User=value;Password={value;with;semicolons}"</param>
-    /// <returns>A tuple containing connection parameters</returns>
+    /// <returns>The parsed connection settings.</returns>
     /// <exception cref="NetezzaException">Thrown when mandatory parameters are missing or format is invalid</exception>
-    internal static (string User, string Password, string Host, string? Database, int? Port, int? Timeout, bool Pooling, int MinPoolSize, int MaxPoolSize, int ConnectionIdleTimeout, int ConnectionLifetime, int ConnectionValidationInterval, bool BulkInsert) ParseConnectionString(string connectionString)
+    internal static NzConnectionSettings ParseConnectionString(string connectionString)
     {
         NzConnectionStringBuilder builder;
         try
@@ -223,7 +262,8 @@ public sealed partial class NzConnection : DbConnection
                 Convert.ToString(rawTimeout, CultureInfo.InvariantCulture),
                 NumberStyles.Integer,
                 CultureInfo.InvariantCulture,
-                out var parsedTimeout))
+                out var parsedTimeout)
+            && parsedTimeout > 0)
         {
             timeout = parsedTimeout;
         }
@@ -237,7 +277,64 @@ public sealed partial class NzConnection : DbConnection
             : NzConnectionStringBuilder.DefaultConnectionValidationInterval;
         bool bulkInsert = !builder.TryGetValue("BulkInsert", out _) || builder.BulkInsert;
 
-        return (
+        bool hasSslMode = TryGetOption(builder, NzOptionParser.SslModeKeys, out string rawSslMode);
+        bool hasSecurityLevel = TryGetOption(builder, NzOptionParser.SecurityLevelKeys, out string rawSecurityLevel);
+        if (hasSslMode && hasSecurityLevel)
+        {
+            throw new NetezzaException(
+                "Specify either SslMode or SecurityLevel in the connection string, not both.");
+        }
+
+        SslMode? sslMode = null;
+        if (hasSslMode)
+        {
+            if (!NzOptionParser.TryParseSslMode(rawSslMode, out SslMode parsedSslMode))
+            {
+                throw new NetezzaException(
+                    $"Invalid SslMode '{rawSslMode}'. Expected disable, prefer, require, verify-ca or verify-full.");
+            }
+            sslMode = parsedSslMode;
+        }
+
+        SecurityLevelCode? securityLevel = null;
+        if (hasSecurityLevel)
+        {
+            if (!NzOptionParser.TryParseSecurityLevel(rawSecurityLevel, out SecurityLevelCode parsedSecurityLevel))
+            {
+                throw new NetezzaException($"Invalid SecurityLevel '{rawSecurityLevel}'.");
+            }
+            securityLevel = parsedSecurityLevel;
+        }
+
+        bool? rejectUnauthorized = null;
+        if (TryGetOption(builder, NzOptionParser.RejectUnauthorizedKeys, out string rawRejectUnauthorized))
+        {
+            rejectUnauthorized = rawRejectUnauthorized.Trim().ToLowerInvariant() switch
+            {
+                "true" or "1" => true,
+                "false" or "0" => false,
+                _ => throw new NetezzaException(
+                    $"Invalid RejectUnauthorized '{rawRejectUnauthorized}'. Expected true or false."),
+            };
+        }
+
+        CharEncoding charVarcharEncoding = CharEncoding.Latin1;
+        if (TryGetOption(builder, NzOptionParser.CharVarcharEncodingKeys, out string rawCharEncoding)
+            && !NzOptionParser.TryParseCharEncoding(rawCharEncoding, out charVarcharEncoding))
+        {
+            throw new NetezzaException(
+                $"Invalid CharVarcharEncoding '{rawCharEncoding}'. Expected latin1 or utf8.");
+        }
+
+        string? sslCertFilePath = TryGetOption(
+            builder,
+            NzOptionParser.SslCertificateKeys,
+            out string rawSslCertFilePath)
+            && !string.IsNullOrWhiteSpace(rawSslCertFilePath)
+                ? rawSslCertFilePath
+                : null;
+
+        return new NzConnectionSettings(
             builder.UserName,
             builder.Password,
             builder.Host,
@@ -250,7 +347,31 @@ public sealed partial class NzConnection : DbConnection
             connectionIdleTimeout,
             connectionLifetime,
             connectionValidationInterval,
-            bulkInsert);
+            bulkInsert,
+            sslMode,
+            securityLevel,
+            sslCertFilePath,
+            rejectUnauthorized,
+            charVarcharEncoding);
+    }
+
+    private static bool TryGetOption(
+        NzConnectionStringBuilder builder,
+        string[] keys,
+        out string value)
+    {
+        foreach (string key in keys)
+        {
+            if (builder.ContainsKey(key))
+            {
+                builder.TryGetValue(key, out object? raw);
+                value = Convert.ToString(raw, CultureInfo.InvariantCulture) ?? string.Empty;
+                return true;
+            }
+        }
+
+        value = string.Empty;
+        return false;
     }
 
 
@@ -578,9 +699,21 @@ public sealed partial class NzConnection : DbConnection
 
     private readonly Dictionary<string, string>? _pgOptions = null;
 
-    private readonly SecurityLevelCode _securityLevel = SecurityLevelCode.PreferredUnsecured;
-    private readonly string? _sslCerFilePath;
+    private SecurityLevelCode _securityLevel = SecurityLevelCode.PreferredUnsecured;
+    private SslMode? _sslMode;
+    private string? _sslCerFilePath;
+    private bool _rejectUnauthorized = true;
+    private bool _verifyHostname = true;
+    private CharEncoding _charVarcharEncoding = CharEncoding.Latin1;
+    private Encoding _charVarcharEncodingImpl = Encoding.Latin1;
     private readonly ILoggerFactory? _loggerFactory;
+
+    internal SecurityLevelCode SecurityLevel => _securityLevel;
+    internal SslMode? ConfiguredSslMode => _sslMode;
+    internal bool RejectUnauthorized => _rejectUnauthorized;
+    internal bool VerifyHostname => _verifyHostname;
+    internal CharEncoding CharVarcharEncoding => _charVarcharEncoding;
+    internal string? SslCertFilePath => _sslCerFilePath;
 
     private bool _disposed = false;
     // Separate from _disposed because Close() is reusable. Set before tearing
@@ -1004,18 +1137,24 @@ public sealed partial class NzConnection : DbConnection
             throw new InvalidOperationException("Connection must be open to begin a transaction.");
         }
 
-        if (isolationLevel != IsolationLevel.Unspecified && isolationLevel != IsolationLevel.ReadCommitted)
+        if (InTransaction)
         {
-            throw new NotSupportedException("Only IsolationLevel.ReadCommitted is supported.");
+            throw new InvalidOperationException(
+                "A transaction is already in progress on this connection. " +
+                "Netezza does not support nested transactions.");
+        }
+
+        if (isolationLevel is not (IsolationLevel.Unspecified or IsolationLevel.ReadCommitted))
+        {
+            throw new NotSupportedException(
+                $"IsolationLevel.{isolationLevel} is not supported. " +
+                "Netezza transactions use READ COMMITTED isolation.");
         }
 
         AutoCommit = false;
-        if (!InTransaction)
-        {
-            _nzCommand ??= (NzCommand)CreateCommand();
-            Execute(this._nzCommand, "begin");
-            InTransaction = true;
-        }
+        _nzCommand ??= (NzCommand)CreateCommand();
+        Execute(this._nzCommand, "begin");
+        InTransaction = true;
         SetState(ConnectionState.Open);
 
         return new NzTransaction(this, IsolationLevel.ReadCommitted);
@@ -1231,7 +1370,14 @@ public sealed partial class NzConnection : DbConnection
         }
         _state = ConnectionState.Connecting;
         _stream = Initialize(_host, _port, useBufferedStream, setSocketBufferSizes);
-        Handshake handShake = new(_socket, _stream, _host, _sslCerFilePath, _loggerFactory)
+        Handshake handShake = new(
+            _socket,
+            _stream,
+            _host,
+            _sslCerFilePath,
+            _loggerFactory,
+            _rejectUnauthorized,
+            _verifyHostname)
         {
             NPSCLIENT_TYPE_PYTHON = clientVersionId
         };
@@ -1299,7 +1445,14 @@ public sealed partial class NzConnection : DbConnection
         }
         _state = ConnectionState.Connecting;
         _stream = await InitializeAsync(_host, _port, useBufferedStream, setSocketBufferSizes, cancellationToken).ConfigureAwait(false);
-        Handshake handShake = new(_socket, _stream, _host, _sslCerFilePath, _loggerFactory)
+        Handshake handShake = new(
+            _socket,
+            _stream,
+            _host,
+            _sslCerFilePath,
+            _loggerFactory,
+            _rejectUnauthorized,
+            _verifyHostname)
         {
             NPSCLIENT_TYPE_PYTHON = clientVersionId
         };
