@@ -363,8 +363,36 @@ connection.Open();
 | `DbDataReader` | `NzDataReader` |
 | `DbParameter` / `DbParameterCollection` | Named and positional parameters |
 | `DbTransaction` | `NzTransaction` |
+| `DbProviderFactory` | `NzFactory.Instance` |
+| `DbConnectionStringBuilder` | `NzConnectionStringBuilder` |
 | `IsolationLevel` | `ReadCommitted` and `Unspecified` |
 | `ChangeDatabase` | `SET CATALOG`; rejected during an active transaction |
+
+### Provider factory and connection strings
+
+`NzFactory` implements `DbProviderFactory`, so the driver can be resolved
+through the standard ADO.NET factory model:
+
+```csharp
+DbProviderFactories.RegisterFactory(
+    "JustyBase.NetezzaDriver", NzFactory.Instance);
+
+DbConnection connection = NzFactory.Instance.CreateConnection()!;
+connection.ConnectionString =
+    "Host=host;Database=db;User=user;Password=pass;Pooling=True";
+connection.Open();
+```
+
+`NzConnectionStringBuilder` derives from `DbConnectionStringBuilder`.
+Passwords containing semicolons round-trip through standard quoting
+(`Password="p;ass"`) and the legacy `Password={p;ass}` form is still accepted.
+The standard indexer, `TryGetValue`, `Remove` and `ConnectionString` members
+are available.
+
+`CommandTimeout` is per command: setting it on one command does not change the
+connection default or another command. `ConnectionString` may be assigned while
+the connection is closed; assigning it while open throws
+`InvalidOperationException`.
 
 ### NULL handling
 
