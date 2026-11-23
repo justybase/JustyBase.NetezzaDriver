@@ -11,7 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.16.0-preview.2" />
-    <PackageReference Include="System.Data.Odbc" Version="10.0.9" />
+    <PackageReference Include="System.Data.Odbc" Version="11.0.0" />
   </ItemGroup>
 
   <ItemGroup>
