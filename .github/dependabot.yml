@@ -8,6 +8,13 @@ updates:
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 5
+    ignore:
+      # The driver pins Logging.Abstractions to the target framework's major
+      # version; upgrading net8.0/net9.0 to 11.x would force netstandard assets
+      # and a major dependency bump on consumers.
+      - dependency-name: "Microsoft.Extensions.Logging.Abstractions"
+        update-types:
+          - "version-update:semver-major"
     groups:
       microsoft-extensions:
         patterns:
