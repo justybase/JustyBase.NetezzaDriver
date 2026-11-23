@@ -25,6 +25,7 @@ public class ReplayReaderBench
         {
             yield return new ReplayScenario("DimDate_3652x19", "dimdate.nzreplay.gz");
             yield return new ReplayScenario("Fact_200000x7", "fact200k.nzreplay.gz");
+            yield return new ReplayScenario("Events_50000x9", "events50k.nzreplay.gz");
         }
     }
 

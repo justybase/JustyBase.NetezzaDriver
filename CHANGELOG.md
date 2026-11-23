@@ -2,7 +2,7 @@
 
 All notable changes to `JustyBase.NetezzaDriver` are documented here.
 
-## Unreleased
+## 1.12.3
 
 ### Changed
 
@@ -11,6 +11,10 @@ All notable changes to `JustyBase.NetezzaDriver` are documented here.
 - `NzDataReader` implements `IDbColumnSchemaGenerator`, so
   `DbDataReaderExtensions.GetColumnSchema` returns provider-native
   `NzDbColumn` objects instead of rebuilding `DataRowDbColumn` wrappers.
+- `ReadAsync()` parses row messages that are already in the application read
+  buffer synchronously instead of running the async state-machine chain per
+  row. Only complete `RowStandard`/`DataRow` messages take this path; control
+  messages, result-set boundaries and buffer refills remain asynchronous.
 
 ### Fixed
 
@@ -18,6 +22,9 @@ All notable changes to `JustyBase.NetezzaDriver` are documented here.
   `NextResult()` advances to another result set.
 - Custom CA validation now requires the server-authentication EKU on the leaf
   certificate instead of accepting any certificate signed by a trusted root.
+- `NzMetadata.GetTableSizesAsync()` accepts the exact NUMERIC text that the
+  reader returns for `skew` values wider than `System.Decimal`, and parses it
+  with the invariant culture.
 
 ## 1.12.2
 

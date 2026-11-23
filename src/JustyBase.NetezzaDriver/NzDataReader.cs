@@ -169,6 +169,32 @@ public sealed class NzDataReader : DbDataReader, IDbColumnSchemaGenerator
             return Task.FromResult(false);
         }
 
+        // While a large result set is arriving, most row messages are already
+        // in the application read buffer. Parse those synchronously instead of
+        // running the async state machine chain (DoNextStepAsync ->
+        // ReadNextResponseByteAsync -> ReadByteAsync -> EnsureAsync) per row.
+        // Only row messages take this path; control messages and result-set
+        // boundaries stay on the asynchronous path.
+        if ((!_singleRow || !_singleRowFirstRowReturned) &&
+            _nzConnection.TryPeekBufferedMessage(out byte messageType, out bool complete) &&
+            complete &&
+            (messageType == (byte)BackendMessageCode.RowStandard ||
+             messageType == (byte)BackendMessageCode.DataRow))
+        {
+            try
+            {
+                bool? result = TryReadBuffered();
+                if (result.HasValue)
+                {
+                    return Task.FromResult(result.Value);
+                }
+            }
+            catch (Exception ex)
+            {
+                return Task.FromException<bool>(ex);
+            }
+        }
+
         var readTask = ReadAsyncCore(cancellationToken);
         if (readTask.IsCompletedSuccessfully)
         {
@@ -176,6 +202,34 @@ public sealed class NzDataReader : DbDataReader, IDbColumnSchemaGenerator
         }
 
         return readTask.AsTask();
+    }
+
+    /// <summary>
+    /// Synchronous continuation for <see cref="ReadAsync"/> when the complete
+    /// next message is already buffered. Returns <c>null</c> when the buffer
+    /// runs out or a result-set boundary is reached, in which case the caller
+    /// resumes with the asynchronous path.
+    /// </summary>
+    private bool? TryReadBuffered()
+    {
+        _opened = _nzConnection.DoNextStep(_nzCommand);
+        if (!_opened)
+        {
+            return false;
+        }
+
+        if (_nzConnection.NewRowReceived())
+        {
+            if (_singleRow)
+            {
+                _singleRowFirstRowReturned = true;
+            }
+            return true;
+        }
+
+        // The caller only enters for a complete RowStandard/DataRow message;
+        // fall back to the async path if the parser disagrees.
+        return null;
     }
 
     private async ValueTask<bool> ReadAsyncCore(CancellationToken cancellationToken)

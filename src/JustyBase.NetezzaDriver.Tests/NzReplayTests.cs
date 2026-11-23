@@ -1,4 +1,5 @@
 using JustyBase.NetezzaDriver.TestSupport;
+using System.Data;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
@@ -28,6 +29,49 @@ public sealed class NzReplayTests
             rows++;
         }
 
+        Assert.Equal(fixture.ExpectedRows, rows);
+    }
+
+    [Fact]
+    public async Task Replay_Fact200k_AsyncRead_ReturnsExpectedRows()
+    {
+        var fixture = NzReplayFixture.LoadShipped("fact200k.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        await using var connection = OpenConnection(server.Port);
+
+        await using var command = connection.CreateCommand(fixture.Query);
+        await using var reader = await command.ExecuteReaderAsync();
+
+        int rows = 0;
+        while (await reader.ReadAsync())
+        {
+            rows++;
+        }
+
+        Assert.Equal(fixture.ExpectedRows, rows);
+    }
+
+    [Fact]
+    public async Task Replay_Fact200k_AsyncSingleRow_ReturnsFirstRowOnly()
+    {
+        var fixture = NzReplayFixture.LoadShipped("fact200k.nzreplay.gz");
+        await using var server = StartServer(fixture);
+        await using var connection = OpenConnection(server.Port);
+
+        await using var command = connection.CreateCommand(fixture.Query);
+        await using var reader = await command.ExecuteReaderAsync(CommandBehavior.SingleRow);
+
+        Assert.True(await reader.ReadAsync());
+        Assert.False(await reader.ReadAsync());
+
+        // Connection still in sync for a normal query.
+        await using var again = connection.CreateCommand(fixture.Query);
+        await using var againReader = await again.ExecuteReaderAsync();
+        int rows = 0;
+        while (await againReader.ReadAsync())
+        {
+            rows++;
+        }
         Assert.Equal(fixture.ExpectedRows, rows);
     }
 

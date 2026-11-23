@@ -1,5 +1,6 @@
 using JustyBase.NetezzaDriver;
 using JustyBase.NetezzaDriver.StringPool;
+using System.Data;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
@@ -90,6 +91,42 @@ public sealed class PoolAndMetadataTests
         string a = pool.GetString(longText.AsSpan());
         string c = pool.GetString(longText.AsSpan());
         Assert.NotSame(a, c);
+    }
+
+    [Fact]
+    public void ReadNullableDouble_HandlesExactNumericTextUnderAnyCulture()
+    {
+        using var table = new DataTable();
+        table.Columns.Add("skew", typeof(string));
+        table.Rows.Add("0.0000000000");
+        table.Rows.Add("1.2500000000");
+        table.Rows.Add(DBNull.Value);
+        using var reader = table.CreateDataReader();
+
+        Assert.True(reader.Read());
+        Assert.Equal(0d, NzMetadata.ReadNullableDouble(reader, 0));
+        Assert.True(reader.Read());
+        Assert.Equal(1.25d, NzMetadata.ReadNullableDouble(reader, 0));
+        Assert.True(reader.Read());
+        Assert.Null(NzMetadata.ReadNullableDouble(reader, 0));
+    }
+
+    [Fact]
+    public void ReadNullableDouble_HandlesNumericAndFloatingPointValues()
+    {
+        using var table = new DataTable();
+        table.Columns.Add("skew", typeof(object));
+        table.Rows.Add(2.5d);
+        table.Rows.Add(3.5f);
+        table.Rows.Add(4.5m);
+        using var reader = table.CreateDataReader();
+
+        Assert.True(reader.Read());
+        Assert.Equal(2.5d, NzMetadata.ReadNullableDouble(reader, 0));
+        Assert.True(reader.Read());
+        Assert.Equal(3.5d, NzMetadata.ReadNullableDouble(reader, 0));
+        Assert.True(reader.Read());
+        Assert.Equal(4.5d, NzMetadata.ReadNullableDouble(reader, 0));
     }
 
     [Fact]

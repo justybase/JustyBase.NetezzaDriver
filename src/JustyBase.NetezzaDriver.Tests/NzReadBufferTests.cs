@@ -1,4 +1,5 @@
 using JustyBase.NetezzaDriver;
+using System.Buffers.Binary;
 
 namespace JustyBase.NetezzaDriver.Tests;
 
@@ -182,6 +183,103 @@ public sealed class NzReadBufferTests
                 Span<byte> destination = stackalloc byte[4];
                 buf.ReadExactly(destination);
             });
+        }
+        finally
+        {
+            buf.Dispose();
+        }
+    }
+
+    [Fact]
+    public void TryPeekRowMessageFrame_DataRow_SizesFromLengthAtOffsetFive()
+    {
+        // type(1) + sequence(4) + length(4) + payload(length)
+        byte[] frame = new byte[9 + 5];
+        frame[0] = (byte)BackendMessageCode.DataRow;
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(1), 1);
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(5), 5);
+
+        using var ms = new MemoryStream(frame, writable: false);
+        var buf = new NzReadBuffer(ms, size: 64);
+        try
+        {
+            buf.Ensure(frame.Length);
+            Assert.True(NzConnection.TryPeekRowMessageFrame(buf, out byte type, out bool complete));
+            Assert.Equal((byte)BackendMessageCode.DataRow, type);
+            Assert.True(complete);
+        }
+        finally
+        {
+            buf.Dispose();
+        }
+    }
+
+    [Fact]
+    public void TryPeekRowMessageFrame_RowStandard_SizesFromPayloadAtOffsetNine()
+    {
+        // RowStandard carries rowLength at offset 5 and the DBOS payload length
+        // at offset 9. The parser consumes only the payload, so a deliberately
+        // inconsistent rowLength must not inflate the frame estimate.
+        byte[] frame = new byte[13 + 20];
+        frame[0] = (byte)BackendMessageCode.RowStandard;
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(1), 1);
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(5), 4 + 20);
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(9), 20);
+
+        using var ms = new MemoryStream(frame, writable: false);
+        var buf = new NzReadBuffer(ms, size: 64);
+        try
+        {
+            buf.Ensure(frame.Length);
+            Assert.True(NzConnection.TryPeekRowMessageFrame(buf, out byte type, out bool complete));
+            Assert.Equal((byte)BackendMessageCode.RowStandard, type);
+            Assert.True(complete, "frame should be sized from the DBOS payload word at offset 9");
+        }
+        finally
+        {
+            buf.Dispose();
+        }
+    }
+
+    [Fact]
+    public void TryPeekRowMessageFrame_RowStandard_IncompleteFrame_IsNotReportedComplete()
+    {
+        byte[] frame = new byte[13 + 20];
+        frame[0] = (byte)BackendMessageCode.RowStandard;
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(1), 1);
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(5), 4 + 20);
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(9), 20);
+
+        using var ms = new MemoryStream(frame.AsSpan(0, frame.Length - 1).ToArray(), writable: false);
+        var buf = new NzReadBuffer(ms, size: 64);
+        try
+        {
+            buf.Ensure(frame.Length - 1);
+            Assert.True(NzConnection.TryPeekRowMessageFrame(buf, out _, out bool complete));
+            Assert.False(complete);
+        }
+        finally
+        {
+            buf.Dispose();
+        }
+    }
+
+    [Fact]
+    public void TryPeekRowMessageFrame_ControlMessage_IsNotReportedComplete()
+    {
+        byte[] frame = new byte[9 + 2];
+        frame[0] = (byte)BackendMessageCode.CommandComplete;
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(1), 1);
+        BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(5), 2);
+
+        using var ms = new MemoryStream(frame, writable: false);
+        var buf = new NzReadBuffer(ms, size: 64);
+        try
+        {
+            buf.Ensure(frame.Length);
+            Assert.True(NzConnection.TryPeekRowMessageFrame(buf, out byte type, out bool complete));
+            Assert.Equal((byte)BackendMessageCode.CommandComplete, type);
+            Assert.False(complete);
         }
         finally
         {

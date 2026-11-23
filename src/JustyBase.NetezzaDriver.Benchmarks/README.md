@@ -165,10 +165,11 @@ end-to-end query time, which stays dominated by the backend (see
 
 `LiveEvents400kBench` reads `JUST_DATA.PERF.EVENTS_400K` (400,000 rows, 9
 columns: BIGINT, INTEGER, TIMESTAMPTZ, NUMERIC(12,2), NUMERIC(12,4), SMALLINT,
-three VARCHARs). Unlike `fact200k.nzreplay.gz`, its SKU/NOTE columns are
-high-cardinality, so it exercises the string-pool cap and realistic mixed
-decode. It needs a live Netezza instance (`NZ_DEV_HOST`, `NZ_DEV_PORT`,
-`NZ_DEV_DB`, `NZ_DEV_USER`, `NZ_DEV_PASSWORD`).
+three VARCHARs) with an explicit `EVENT_ID` projection ordered by `EVENT_ID`.
+Unlike `fact200k.nzreplay.gz`, its SKU/NOTE columns are high-cardinality, so it
+exercises the string-pool cap and realistic mixed decode. It needs a live
+Netezza instance (`NZ_DEV_HOST`, `NZ_DEV_PORT`, `NZ_DEV_DB`, `NZ_DEV_USER`,
+`NZ_DEV_PASSWORD`).
 
 ```bash
 dotnet run -c Release --project src/JustyBase.NetezzaDriver.Benchmarks --framework net11.0 -- \
@@ -182,6 +183,14 @@ Current build, live localhost, .NET 11 JIT, `ShortRun` + `MemoryDiagnoser`:
 | `Sync_GetValue` | 297.7 ms | 104.07 MB |
 | `Sync_FullDecode_NoGetValue` | 294.5 ms | 43.04 MB |
 | `Sync_Typed` | 292.7 ms | 43.04 MB |
+
+`Async_GetValue` was added on 2026-11-23. The async row path now parses buffered
+row messages synchronously, so it no longer pays one async state machine per
+row. Live wall time remains backend/transfer-bound (a single-iteration smoke
+run measured 364.6 ms vs 389.2 ms for `Sync_GetValue`; treat that as directional
+only). See `PERFORMANCE.md` for the offline interleaved A/B numbers.
+`ReplayReaderBench` also includes the recorded `Events_50000x9` fixture for a
+high-cardinality, appliance-free comparison.
 
 The wall time is dominated by the backend/transfer, so do not compare separate
 BDN runs to judge a driver change. Interleaved A/B runs of the same scan

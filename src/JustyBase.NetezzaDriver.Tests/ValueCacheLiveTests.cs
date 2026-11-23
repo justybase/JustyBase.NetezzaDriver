@@ -21,6 +21,7 @@ public sealed class ValueCacheLiveTests
             , T1.SKU
             , T1.NOTE
         FROM JUST_DATA.PERF.EVENTS_400K T1
+        ORDER BY T1.EVENT_ID
         """;
 
     private const string FactProductInventory = """

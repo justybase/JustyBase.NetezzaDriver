@@ -651,6 +651,76 @@ public sealed partial class NzConnection
     private FileStream _nextRelatedFileStream = null!;
     private BulkInsertData? _pendingBulkData;
 
+    /// <summary>
+    /// Peeks at the next buffered row message when its type byte has not been
+    /// consumed yet. Returns <c>false</c> when no type byte is buffered (or the
+    /// previous step already consumed it), so callers can fall back to the
+    /// normal asynchronous path. Only <c>RowStandard</c> and <c>DataRow</c>
+    /// frames are sized here; their consumption is the only thing this fast
+    /// path needs.
+    /// </summary>
+    internal bool TryPeekBufferedMessage(out byte messageType, out bool complete)
+    {
+        messageType = 0;
+        complete = false;
+
+        var buffer = _readBuffer;
+        if (buffer is null || !_shouldReadByte)
+            return false;
+
+        return TryPeekRowMessageFrame(buffer, out messageType, out complete);
+    }
+
+    /// <summary>
+    /// Sizes the frame of a buffered <c>RowStandard</c> or <c>DataRow</c>
+    /// message. Any other type reports <c>complete = false</c> so the caller
+    /// falls back to the regular parser.
+    /// </summary>
+    internal static bool TryPeekRowMessageFrame(NzReadBuffer buffer, out byte messageType, out bool complete)
+    {
+        messageType = 0;
+        complete = false;
+
+        int available = buffer.BytesBuffered;
+        if (available < 1)
+            return false;
+
+        messageType = buffer.PeekByte(0);
+
+        if (messageType == (byte)BackendMessageCode.DataRow)
+        {
+            // type(1) + sequence(4) + length(4) + payload(length)
+            if (available < 9)
+                return true;
+
+            uint payloadLength = buffer.PeekUInt32BigEndian(5);
+            if (payloadLength > int.MaxValue - 9)
+                return true;
+
+            complete = available >= 9 + (int)payloadLength;
+            return true;
+        }
+
+        if (messageType == (byte)BackendMessageCode.RowStandard)
+        {
+            // RowStandard carries two lengths: rowLength at offset 5 and the
+            // DBOS payload length at offset 9. ResReadDbosTuple consumes only
+            // the payload, and rowLength is not validated against it, so size
+            // the frame from the payload word and the 13-byte header.
+            if (available < 13)
+                return true;
+
+            uint payloadLength = buffer.PeekUInt32BigEndian(9);
+            if (payloadLength > int.MaxValue - 13)
+                return true;
+
+            complete = available >= 13 + (int)payloadLength;
+            return true;
+        }
+
+        return true;
+    }
+
     internal bool NewRowReceived()
     {
         return _lastResponse == (byte)BackendMessageCode.RowStandard || _lastResponse == (byte)BackendMessageCode.DataRow;

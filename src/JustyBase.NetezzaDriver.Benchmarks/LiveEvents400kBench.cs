@@ -17,7 +17,22 @@ public class LiveEvents400kBench
 {
     private NzConnection _connection = null!;
 
-    private const string Query = "SELECT * FROM JUST_DATA.PERF.EVENTS_400K";
+    // Explicit projection and deterministic order keep runs comparable with
+    // the shared replay fixture and the other driver harnesses.
+    private const string Query = """
+        SELECT
+            T1.EVENT_ID
+            , T1.CUSTOMER_ID
+            , T1.EVENT_TS
+            , T1.AMOUNT
+            , T1.TAX
+            , T1.QUANTITY
+            , T1.STATUS
+            , T1.SKU
+            , T1.NOTE
+        FROM JUST_DATA.PERF.EVENTS_400K T1
+        ORDER BY T1.EVENT_ID
+        """;
 
     [GlobalSetup]
     public void Setup()
@@ -58,6 +73,28 @@ public class LiveEvents400kBench
         int rows = 0;
         while (reader.Read())
         {
+            rows++;
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Asynchronous counterpart of <see cref="Sync_GetValue"/>; most row
+    /// messages are already buffered, so the reader can complete without an
+    /// async state machine per row.
+    /// </summary>
+    [Benchmark]
+    public async Task<int> Async_GetValue()
+    {
+        await using var command = _connection.CreateCommand(Query);
+        await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        int rows = 0;
+        while (await reader.ReadAsync().ConfigureAwait(false))
+        {
+            for (int i = 0; i < reader.FieldCount; i++)
+            {
+                _ = reader.GetValue(i);
+            }
             rows++;
         }
         return rows;

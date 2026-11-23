@@ -1281,4 +1281,85 @@ The difference is well inside run noise; boxing still dominates. The change was
 reverted. `Sync_GetValues` / `Sync_GetValues_Lazy` remain as benchmarks so a
 future allocation-reduction attempt has a baseline.
 
+# Async read fast path (2026-11-23)
+
+This pass targeted the asynchronous reader. The baseline showed that
+`Async_GetValue` was roughly twice as slow as the synchronous path on the same
+replay fixture, even though the socket data was already buffered. Profiling
+with `dotnet-trace` (sampled thread time) showed the per-row async chain
+(`ReadAsync` -> `DoNextStepAsync` -> `ReadNextResponseByteAsync` ->
+`ReadByteAsync` -> `EnsureAsync` and the matching length reads) rather than the
+row decoder: `ParseDbosTupleData` was only a few percent of samples while the
+async state-machine `MoveNext` frames dominated the client-side work.
+
+## Accepted: parse complete buffered row messages synchronously in `ReadAsync`
+
+### After
+
+`NzConnection.TryPeekBufferedMessage()` inspects the next backend message only
+when its type byte is still pending and the complete message is in
+`NzReadBuffer`. `NzDataReader.ReadAsync` uses that to run the normal synchronous
+`DoNextStep` for complete `RowStandard`/`DataRow` messages. Control messages,
+result-set boundaries, oversized rows and buffer refills still use the
+asynchronous path, so cancellation, protocol framing and ADO.NET semantics are
+unchanged. Frame sizing is type-specific: `DataRow` uses the length word at
+offset 5, while `RowStandard` uses the DBOS payload word at offset 9 (the
+`rowLength` word at offset 5 is not consumed by the parser and is not
+cross-checked against it). A response buffer holds ~1000 rows, so nearly all
+row reads avoid the async state machines; only the per-buffer refill does I/O
+asynchronously.
+
+### Measurement
+
+Interleaved A/B (same harness, alternating the pre-built baseline and changed
+driver DLL, medians; no BDN build/runtime drift). Windows 11, AMD Ryzen 7
+7840HS, loopback replay, `fact200k.nzreplay.gz` (200000x7):
+
+| Runtime | Baseline | After | Change |
+|---|---:|---:|---:|
+| .NET 10, Async `GetValue` | 55.8-63.5 ms | 29.1-31.3 ms | **~50% faster** |
+| .NET 11, Async `GetValue` | 36.1-44.3 ms | 29.0-32.8 ms | **~13-35% faster** |
+| .NET 10, Async DimDate 3652x19 | 10.7-11.5 ms | 5.5-9.4 ms | **~18-40% faster** |
+
+`events50k.nzreplay.gz` (50000x9, the high-cardinality EVENTS projection) was
+added to `ReplayReaderBench` as an additional replay scenario. Interleaved
+harness A/B: `103.2-104.5 ms -> 74.1-75.0 ms` (**~28% faster**), allocations
+unchanged (13604 KB). A quick BDN A/B (`WarmupCount=1`, `IterationCount=2`)
+measured `Async_GetValue` `25.184 ms -> 17.959 ms` (**-28.7%**), also with
+unchanged allocations.
+
+BenchmarkDotNet `ShortRun` on the same fixture (NativeAOT, .NET 10.0.15) shows
+the same direction; the absolute means have a wide confidence interval:
+
+| Method | Baseline | After |
+|---|---:|---:|
+| `Async_GetValue` DimDate | 2.676 ms | 1.912 ms |
+| `Async_GetValue` Fact200k | 79.380 ms | 42.085 ms |
+
+Allocations are unchanged (the values and strings are the same); the win is
+client CPU and latency. The synchronous path was not touched: `Sync_GetValue`
+stayed at ~27 ms on fact200k.
+
+Live EVENTS_400K is server/transfer-bound, so the client-side effect is
+smaller there. After switching the benchmark projection to `ORDER BY
+T1.EVENT_ID`, a one-iteration BDN smoke run measured `Sync_GetValue` at
+389.2 ms and `Async_GetValue` at 364.6 ms; that is directional only, not a
+release-grade comparison. The win is removed async machinery, not server time.
+
+### Decision
+
+**ACCEPTED.** Regression coverage: `Replay_Fact200k_AsyncRead_ReturnsExpectedRows`
+reads the full 11.4 MB fixture through `ReadAsync`, crossing the 64 KB buffer
+boundary, and the existing async replay/pool tests pass on both TFMs.
+
+## Fixed during live validation: `GetTableSizesAsync` skew parsing
+
+The full live `Category=Integration` run against a local Netezza instance
+exposed a pre-existing metadata bug: `_v_table_storage_stat.skew` can be an
+exact NUMERIC above `System.Decimal` precision, which the reader correctly
+returns as invariant text. `Convert.ToDouble` then used the machine's
+Polish culture and threw `FormatException` for `"0.0000000000"`.
+`NzMetadata.ReadNullableDouble` now handles numeric, floating-point and
+invariant text values. Unit tests cover all three and the live test passes.
+
 ## STOP - DO NOT TOUCH WITHOUT PROFILING.

@@ -182,6 +182,24 @@ internal sealed class NzReadBuffer : IDisposable
         return value;
     }
 
+    /// <summary>
+    /// Returns a byte that is already buffered without consuming it. The caller
+    /// must ensure <see cref="BytesBuffered"/> is greater than <paramref name="offset"/>.
+    /// Used by the async read fast path to inspect the next backend message
+    /// before deciding whether it can be parsed synchronously.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public byte PeekByte(int offset)
+    {
+        return _buffer[_readPos + offset];
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public uint PeekUInt32BigEndian(int offset)
+    {
+        return BinaryPrimitives.ReadUInt32BigEndian(_buffer.AsSpan(_readPos + offset, sizeof(uint)));
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ReadOnlySpan<byte> ReadSpan(int count)
     {

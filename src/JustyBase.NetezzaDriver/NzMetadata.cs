@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.Common;
+using System.Globalization;
 
 namespace JustyBase.NetezzaDriver;
 
@@ -137,8 +138,30 @@ public sealed partial class NzMetadata
             reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2)),
             reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
             reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4)),
-            reader.IsDBNull(5) ? null : Convert.ToDouble(reader.GetValue(5))
+            ReadNullableDouble(reader, 5)
         )).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads a nullable floating-point catalog value. Netezza can expose
+    /// <c>skew</c> as an exact NUMERIC above System.Decimal's precision; the
+    /// reader returns that column as invariant text, so Convert.ToDouble on the
+    /// boxed string would throw FormatException on this machine's culture.
+    /// </summary>
+    internal static double? ReadNullableDouble(DbDataReader reader, int ordinal)
+    {
+        if (reader.IsDBNull(ordinal))
+            return null;
+
+        object value = reader.GetValue(ordinal);
+        return value switch
+        {
+            double d => d,
+            float f => f,
+            decimal m => (double)m,
+            string s => double.Parse(s, CultureInfo.InvariantCulture),
+            _ => Convert.ToDouble(value, CultureInfo.InvariantCulture),
+        };
     }
 
     public async Task<IReadOnlyList<NzSessionInfo>> GetSessionsAsync()
